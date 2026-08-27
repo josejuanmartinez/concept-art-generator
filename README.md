@@ -15,16 +15,16 @@ Claude orchestrator
              draft → approved → final
                  │          │
        GPT Image 2      HF Space + named LoRA
-       reference edit   /v1/generate
+       reference edit   queued Gradio API
 ```
 
 - **Isolation:** each game lives under `data/games/<game>/`; references are selected only from that folder and hashes are recorded in each job. There is no global reference pool.
 - **Human oversight:** `final` refuses all non-approved jobs.
 - **Transparency:** both providers are asked for transparent output and a verifier rejects opaque PNGs before export.
 - **Cost hygiene:** each paid stage appends a record to `data/usage.jsonl`; secrets are environment variables and never committed.
-- **Providers:** GPT Image 2 uses the image-edit endpoint with up to `X` game-local references. The HF backend calls the private Qwen Image LoRA Space with a LoRA name. GPT Image 2 supports image input/output through image endpoints, per [official OpenAI documentation](https://developers.openai.com/api/docs/models/gpt-image-2).
+- **Providers:** GPT Image 2 uses the image-edit endpoint with up to `X` game-local references. The HF backend submits to the private Qwen Image LoRA Space's supported Gradio API, follows the returned event ID through heartbeat/error/complete events, and downloads the completed PNG. GPT Image 2 supports image input/output through image endpoints, per [official OpenAI documentation](https://developers.openai.com/api/docs/models/gpt-image-2).
 
-The final pass requests high quality, then uses alpha-safe Lanczos scaling to a 2K maximum edge without another billed provider call.
+The final pass requests high quality and exports a 2K maximum edge. The Hugging Face path uses the Space's Swin2SR neural upscaler; the GPT Image 2 path uses alpha-safe local scaling without another billed provider call.
 
 ## Setup
 
@@ -43,16 +43,38 @@ The application loads `.env` automatically; values already present in the shell 
 |---|---|---|
 | `OPENAI_API_KEY` | GPT Image 2 | Provider credential |
 | `HF_SPACE_URL` | Hugging Face | Example: `https://<owner>-qwen-image-lora-studio.hf.space` |
-| `HF_API_TOKEN` or `HF_TOKEN` | Private Space/LoRA | Token with read access |
+| `HF_TOKEN` | Private Space/LoRA | Token with read access |
 
 Keys are loaded from `.env` or the shell; shell values take precedence. They are used as provider authentication headers only and are not added to prompts, job JSON, usage logs, output metadata, or UI responses. `.env` is gitignored. Still treat any agent or program with shell/environment access as trusted code: use dedicated least-privilege provider keys, set a spend cap for OpenAI, scope the HF token to the private Space/LoRA access required, and rotate a key if it is exposed.
+
+# Instructions for agents
+
+This game can be ran inside an orchestrator agent like Claude, that will use the project subagents and report only verified outcomes.
+
+If you are an agent:
+
+1. Ask which single game slug is in scope. Never read, attach, summarize, or transmit another game's references.
+2. If Hugging Face is selected, ask the user for the exact LoRA model slug in Hugging Face before making a request. Prefer the fully qualified `owner/repo` slug. Never infer it from the game slug, job name, local folder, or examples in this README.
+3. Delegate planning to `style-director`; it is read-only and game-scoped.
+4. Have `technical-artist` make one 512px draft. Do not produce a final in the same step.
+5. Wait for explicit human approval via `concept-art approve <game> <job-id>`.
+6. Delegate final export then invoke `verifier` last.
+7. Route failures back to `technical-artist`, never to `verifier`.
+
+## Backends
+
+- **Hugging Face Space:** requires the exact user-confirmed Hugging Face LoRA model slug and `HF_SPACE_URL` / `HF_TOKEN`. Ask for the slug when it has not been supplied; do not guess it. Do not send reference images to the Space.
+- **GPT Image 2:** sends only the selected references inside `data/games/<game>/references/` to the edit API.
+
+Never place API keys in prompts, source files, job JSON, logs, screenshots, or commits. Keep invoices in provider accounts; use `data/usage.jsonl` as the local usage log.
+
 
 ## Choosing a generation backend
 
 | Backend | Use it when | Pros | Trade-offs |
 |---|---|---|---|
 | **GPT Image 2** | You have a small, selected set of game references and need strong visual adherence without training first. | Sends `X` selected, game-local reference images to the edit endpoint; fast to start; no LoRA training or GPU operations to manage; requests transparent output. | Paid per generation; references leave the local machine for the provider; needs `OPENAI_API_KEY`; style consistency depends on reference selection and prompt quality. |
-| **Hugging Face Space + named LoRA** | A game's visual style already has a trained private Qwen Image LoRA. | Does not transmit the game reference images for inference; reusable style adapter; private LoRA naming makes game-specific style selection explicit; supports native 2K final requests and server-side background removal. | Requires an available GPU Space and private-token access; first inference can be slow; segmentation can trim delicate details, so quality must be reviewed. |
+| **Hugging Face Space + named LoRA** | A game's visual style already has a trained private Qwen Image LoRA. | Does not transmit the game reference images for inference; reusable style adapter; private LoRA naming makes game-specific style selection explicit; supports Swin2SR 2K finals and server-side background removal. | Requires an available GPU Space and private-token access; first inference or upscaling can be slow; segmentation can trim delicate details, so quality must be reviewed. |
 
 Both routes create a 512px draft first, require explicit approval before a final, and reject opaque PNGs rather than silently exporting non-transparent assets.
 
@@ -60,7 +82,32 @@ Both routes create a 512px draft first, require explicit approval before a final
 
 When Hugging Face is selected, it is always tried first. A timeout, forbidden response, malformed response, or other provider error automatically retries through GPT Image 2 using only the selected, game-local references; the job audit notes record the fallback. If GPT Image 2 is unavailable or the game has no references, the job fails safely instead of using another game's style.
 
-Final exports always have a **2048px long edge** and preserve their PNG alpha channel. The HF path requests a native 2K render. GPT Image 2 currently supplies its highest supported high-quality landscape source (1536×1024); the application performs one alpha-preserving local upscale to a 2K canvas and records the output dimensions in the job. It never promotes the 512px draft to a final.
+Final exports always have a **2048px long edge** and preserve their PNG alpha channel. For an HF final, the client requests an approximately 1K source and sends `upscale_to_2k: true`; the Space then applies tiled Swin2SR. It also sends `remove_background: true` when Transparent PNG is selected. Drafts send `upscale_to_2k: false`. GPT Image 2 currently supplies its highest supported high-quality landscape source (1536×1024); the application performs one alpha-preserving local upscale to a 2K canvas and records the output dimensions in the job. It never promotes the 512px draft to a final.
+
+The equivalent Space request options are:
+
+```json
+{
+  "width": 1024,
+  "height": 683,
+  "remove_background": true,
+  "upscale_to_2k": true
+}
+```
+
+`remove_background` controls PNG transparency independently from 2K upscaling, so either option can be enabled without the other.
+
+### Hugging Face queued API protocol
+
+Private Gradio Spaces do not return the image synchronously. The client:
+
+1. Sends the named request object to `POST <HF_SPACE_URL>/gradio_api/call/v2/generate_ui`, including the bearer `HF_TOKEN`.
+2. Reads the required `event_id` from the submission response.
+3. Opens `GET <HF_SPACE_URL>/gradio_api/call/generate_ui/<event_id>` with the same token.
+4. Keeps the stream open through `heartbeat` events, fails on `error`, and waits for `complete`.
+5. Reads the image URL from the completed result and downloads it with the same token.
+
+The event ID is retained as the provider request ID in job provenance. A completed event is not considered successful until the returned image has also downloaded and passed the workflow's PNG transparency check.
 
 ## CLI
 
@@ -69,7 +116,7 @@ concept-art add-reference massive-warfare path\to\mw_reference.png
 concept-art add-reference battle-cars path\to\bc_reference.png
 
 concept-art draft massive-warfare "heavy tracked artillery drone" --backend gpt-image-2 --references 4
-concept-art draft massive-warfare "heavy tracked artillery drone" --backend huggingface --lora-name massive-warfare-v1
+concept-art draft massive-warfare "heavy tracked artillery drone" --backend huggingface --lora-name <exact-owner>/<exact-lora-repo>
 
 concept-art approve massive-warfare <job-id>
 concept-art final massive-warfare <job-id>

@@ -151,6 +151,9 @@ activemq-data/
 .env
 .envrc
 .venv
+
+# Private game references, generated concepts, and local provider usage records.
+data/
 env/
 venv/
 ENV/
