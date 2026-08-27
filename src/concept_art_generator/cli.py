@@ -16,12 +16,22 @@ def parser() -> argparse.ArgumentParser:
     ref = actions.add_parser("add-reference")
     ref.add_argument("game")
     ref.add_argument("file")
+    ref.add_argument(
+        "description",
+        nargs="?",
+        help="Optional image description; when omitted GPT creates one with OPENAI_API_KEY.",
+    )
     draft = actions.add_parser("draft")
     draft.add_argument("game")
     draft.add_argument("prompt")
     draft.add_argument("--backend", choices=[b.value for b in Backend], required=True)
     draft.add_argument("--lora-name")
-    draft.add_argument("--references", type=int, default=4)
+    draft.add_argument("--negative-prompt", default="")
+    draft.add_argument("--seed", type=int)
+    draft.add_argument("--steps", type=int, default=28)
+    draft.add_argument("--guidance-scale", type=float, default=4.0)
+    draft.add_argument("--lora-scale", type=float, default=0.8)
+    draft.add_argument("--references", type=int, default=16, choices=range(1, 17))
     draft.add_argument(
         "--opaque", action="store_true", help="Allow an opaque output instead of transparent PNG."
     )
@@ -46,7 +56,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser().parse_args(argv)
     flow = ConceptArtWorkflow(args.data_dir)
     if args.action == "add-reference":
-        result = {"reference": str(flow.add_reference(args.game, args.file))}
+        result = {"reference": str(flow.add_reference(args.game, args.file, args.description))}
     elif args.action == "draft":
         result = flow.create_draft(
             ArtRequest(
@@ -56,6 +66,11 @@ def main(argv: list[str] | None = None) -> None:
                 args.lora_name,
                 args.references,
                 transparent=not args.opaque,
+                negative_prompt=args.negative_prompt,
+                seed=args.seed,
+                steps=args.steps,
+                guidance_scale=args.guidance_scale,
+                lora_scale=args.lora_scale,
             )
         ).to_dict()
     elif args.action == "approve":

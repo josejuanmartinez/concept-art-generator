@@ -29,9 +29,16 @@ class ArtRequest:
     prompt: str
     backend: Backend
     lora_name: str | None = None
-    reference_count: int = 4
+    reference_count: int = 16
     logo_path: str | None = None
     transparent: bool = True
+    negative_prompt: str = ""
+    seed: int | None = None
+    steps: int = 28
+    guidance_scale: float = 4.0
+    lora_scale: float = 0.8
+    scheduler: str | None = None
+    base_model: str | None = None
 
 
 @dataclass(slots=True)
@@ -47,11 +54,14 @@ class ArtJob:
     final_path: str | None = None
     lora_name: str | None = None
     reference_hashes: list[str] = field(default_factory=list)
+    reference_files: list[str] = field(default_factory=list)
+    reference_descriptions: dict[str, str] = field(default_factory=dict)
     cost_usd: float = 0.0
     transparent: bool = True
     notes: list[str] = field(default_factory=list)
     feedback: list[dict[str, str]] = field(default_factory=list)
     artifacts: dict[str, dict] = field(default_factory=dict)
+    generation_parameters: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)

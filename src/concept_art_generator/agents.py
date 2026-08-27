@@ -8,7 +8,7 @@ class StyleDirector:
     """The read-only planning subagent: sees only one game's references."""
 
     def brief(self, request: ArtRequest, workspace: GameWorkspace) -> str:
-        count = len(workspace.reference_files(request.reference_count))
+        count = min(len(workspace.reference_files()), request.reference_count)
         if not count:
             raise ValueError(f"{request.game} has no references. Add them before generating.")
         logo = (

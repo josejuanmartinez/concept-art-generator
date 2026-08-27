@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import base64
-import json
 import os
 from abc import ABC, abstractmethod
 from contextlib import ExitStack
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
 
 import httpx
 from PIL import Image
@@ -25,6 +23,12 @@ class RenderSpec:
     transparent: bool
     lora_name: str | None = None
     seed: int | None = None
+    negative_prompt: str = ""
+    steps: int = 28
+    guidance_scale: float = 4.0
+    lora_scale: float = 0.8
+    scheduler: str | None = None
+    base_model: str | None = None
 
 
 @dataclass(slots=True)
@@ -32,6 +36,7 @@ class RenderedImage:
     png: bytes
     estimated_cost_usd: float
     provider_request_id: str | None = None
+    generation_parameters: dict | None = None
 
 
 class ArtProvider(ABC):
@@ -60,68 +65,40 @@ class HuggingFaceSpaceProvider(ArtProvider):
         payload = {
             "prompt": spec.prompt,
             "lora_name": spec.lora_name,
-            "negative_prompt": "",
+            "negative_prompt": spec.negative_prompt,
             "width": request_width,
             "height": request_height,
-            "steps": 16 if max(spec.width, spec.height) <= 512 else 28,
-            "guidance": 4.0,
-            "scale": 0.8,
+            "steps": spec.steps,
+            "guidance_scale": spec.guidance_scale,
+            "lora_scale": spec.lora_scale,
             "seed": spec.seed,
+            "scheduler": spec.scheduler,
+            "base_model": spec.base_model,
             "remove_background": spec.transparent,
             "upscale_to_2k": upscale_to_2k,
         }
-        submission = httpx.post(
-            f"{self.url}/gradio_api/call/v2/generate_ui",
+        response = httpx.post(
+            f"{self.url}/v1/generate",
             json=payload,
             headers=headers,
-            timeout=60,
-        )
-        submission.raise_for_status()
-        event_id = submission.json().get("event_id")
-        if not isinstance(event_id, str) or not event_id:
-            raise RuntimeError("Hugging Face Space did not return a generation event ID.")
-
-        result = None
-        event_name = None
-        with httpx.stream(
-            "GET",
-            f"{self.url}/gradio_api/call/generate_ui/{event_id}",
-            headers=headers,
             timeout=900,
-        ) as events:
-            events.raise_for_status()
-            for line in events.iter_lines():
-                if line.startswith("event:"):
-                    event_name = line.partition(":")[2].strip()
-                elif line.startswith("data:") and event_name == "error":
-                    error = self._event_error(line.partition(":")[2].strip())
-                    raise RuntimeError(f"Hugging Face Space generation failed: {error}")
-                elif line.startswith("data:") and event_name == "complete":
-                    result = json.loads(line.partition(":")[2].strip())
-                    break
-        if not isinstance(result, list) or not result or not isinstance(result[0], dict):
-            raise RuntimeError("Hugging Face Space closed without a valid completed image result.")
-
-        image_url = result[0].get("url")
-        if not isinstance(image_url, str) or not image_url:
-            raise RuntimeError("Hugging Face Space completed without an image URL.")
-        image_url = urljoin(f"{self.url}/", image_url)
-        if urlparse(image_url).netloc != urlparse(self.url).netloc:
-            raise RuntimeError("Hugging Face Space returned an image URL on an unexpected host.")
-        image_response = httpx.get(image_url, headers=headers, timeout=120, follow_redirects=True)
-        image_response.raise_for_status()
-        return RenderedImage(image_response.content, 0.0, event_id)
-
-    @staticmethod
-    def _event_error(raw_data: str) -> str:
-        try:
-            payload = json.loads(raw_data)
-        except json.JSONDecodeError:
-            return raw_data or "unknown queue error"
-        if isinstance(payload, dict) and payload.get("error"):
-            return str(payload["error"])
-        return "the private Space returned a redacted queue error; inspect its runtime logs"
-
+        )
+        response.raise_for_status()
+        result = response.json()
+        image_b64 = result.get("image_base64") if isinstance(result, dict) else None
+        if not isinstance(image_b64, str) or not image_b64:
+            raise RuntimeError("Hugging Face Space returned no base64 PNG.")
+        parameters = result.get("generation_parameters")
+        if not isinstance(parameters, dict) or not isinstance(parameters.get("seed"), int):
+            raise RuntimeError(  # noqa: TRY004 - malformed external provider response
+                "Hugging Face Space returned no replayable generation parameters."
+            )
+        return RenderedImage(
+            base64.b64decode(image_b64),
+            0.0,
+            response.headers.get("x-request-id"),
+            parameters,
+        )
 
 class GPTImage2Provider(ArtProvider):
     backend = Backend.GPT_IMAGE_2
@@ -131,9 +108,15 @@ class GPTImage2Provider(ArtProvider):
             raise ValueError(
                 "GPT Image 2 requires at least one reference image for style preservation."
             )
+        if len(spec.references) > 16:
+            raise ValueError("GPT Image 2 accepts at most 16 reference images.")
         from openai import OpenAI
 
         client = OpenAI()
+        is_draft = max(spec.width, spec.height) <= 512
+        # GPT Image 2 cannot render a 512x512 output. Keep the workflow's draft
+        # intent, but request and retain the model's supported 1024px square draft.
+        request_size = "1024x1024" if is_draft else f"{spec.width}x{spec.height}"
         # The edits endpoint accepts image inputs; only this game's bounded reference list is sent.
         with ExitStack() as stack:
             handles = [stack.enter_context(open(path, "rb")) for path in spec.references]
@@ -141,8 +124,8 @@ class GPTImage2Provider(ArtProvider):
                 model="gpt-image-2",
                 image=handles,
                 prompt=spec.prompt,
-                size=f"{spec.width}x{spec.height}",
-                quality="low" if max(spec.width, spec.height) <= 512 else "high",
+                size=request_size,
+                quality="low" if is_draft else "high",
                 background="transparent" if spec.transparent else "auto",
                 response_format="b64_json",
             )
