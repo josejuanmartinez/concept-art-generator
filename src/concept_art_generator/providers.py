@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 from PIL import Image
 
-from .models import Backend
+from .models import DEFAULT_BACKGROUND_MODEL, Backend
 
 
 @dataclass(slots=True)
@@ -26,9 +26,10 @@ class RenderSpec:
     negative_prompt: str = ""
     steps: int = 28
     guidance_scale: float = 4.0
-    lora_scale: float = 0.8
+    lora_scale: float = 1.25
     scheduler: str | None = None
     base_model: str | None = None
+    background_model: str = DEFAULT_BACKGROUND_MODEL
 
 
 @dataclass(slots=True)
@@ -75,6 +76,8 @@ class HuggingFaceSpaceProvider(ArtProvider):
             "scheduler": spec.scheduler,
             "base_model": spec.base_model,
             "remove_background": spec.transparent,
+            # Name the segmentation model explicitly; the Space rejects an unknown one with a 400.
+            "background_model": spec.background_model,
             "upscale_to_2k": upscale_to_2k,
         }
         response = httpx.post(

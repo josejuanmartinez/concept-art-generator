@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import secrets
+from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
 
-from .agents import QualityGate, StyleDirector
-from .models import ArtJob, ArtRequest, Backend, JobState
+from .agents import QualityGate
+from .loras import resolve_lora
+from .models import DEFAULT_BACKGROUND_MODEL, ArtJob, ArtRequest, Backend, JobState
+from .prompts import build_prompt
 from .providers import (
     ArtProvider,
     GPTImage2Provider,
@@ -16,7 +19,14 @@ from .providers import (
     RenderedImage,
     RenderSpec,
 )
-from .references import MAX_REFERENCE_IMAGES, OpenAIReferenceAgent, ReferenceAgent
+from .references import (
+    MAX_REFERENCE_IMAGES,
+    OpenAIReferenceAgent,
+    ReferenceAgent,
+    caption_for,
+    load_caption_sidecars,
+    sidecar_caption,
+)
 from .workspace import GameWorkspace
 
 
@@ -36,12 +46,24 @@ class ConceptArtWorkflow:
             Backend.GPT_IMAGE_2: GPTImage2Provider(),
         }
         self.reference_agent = reference_agent or OpenAIReferenceAgent()
-        self.director, self.gate = StyleDirector(), QualityGate()
+        self.gate = QualityGate()
 
     def workspace(self, game: str) -> GameWorkspace:
         return GameWorkspace(self.root, game)
 
-    def add_reference(self, game: str, source: str | Path, description: str | None = None) -> Path:
+    def add_reference(
+        self,
+        game: str,
+        source: str | Path,
+        description: str | None = None,
+        *,
+        describe_missing: bool = True,
+    ) -> Path:
+        """Caption priority: the supplied text, then a sibling `.txt`, then GPT.
+
+        `describe_missing=False` stores an empty description instead of calling GPT, for the
+        UI flow where a human captions the references by hand afterwards.
+        """
         source = Path(source)
         if source.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
             raise ValueError("References must be PNG, JPG, JPEG or WebP.")
@@ -49,20 +71,46 @@ class ConceptArtWorkflow:
         if target.exists() and target.read_bytes() != source.read_bytes():
             target = target.with_stem(f"{source.stem}-{source.stat().st_size}")
         target.write_bytes(source.read_bytes())
-        effective_description = (description or "").strip()
-        if not effective_description:
+        effective_description = (description or "").strip() or (sidecar_caption(source) or "")
+        if not effective_description and describe_missing:
             effective_description = self.reference_agent.describe(target)
         self.workspace(game).set_reference_description(target.name, effective_description)
         return target
 
+    def reference_descriptions(self, game: str) -> dict[str, str]:
+        """Every reference filename for this game mapped to its stored description."""
+        ws = self.workspace(game)
+        stored = ws.reference_descriptions()
+        return {path.name: stored.get(path.name, "") for path in ws.reference_files()}
+
+    def set_reference_description(self, game: str, filename: str, description: str) -> None:
+        ws = self.workspace(game)
+        ws.reference_paths([filename])  # refuse a name that is not this game's reference
+        ws.set_reference_description(filename, description)
+
+    def apply_caption_files(self, game: str, caption_paths: list[Path]) -> int:
+        """Fill descriptions from uploaded `.txt` files matched by stem; returns matches."""
+        sidecars = load_caption_sidecars(caption_paths)
+        matched = 0
+        for filename in self.reference_descriptions(game):
+            text = caption_for(filename, sidecars)
+            if text:
+                self.set_reference_description(game, filename, text)
+                matched += 1
+        return matched
+
     def create_draft(self, request: ArtRequest) -> ArtJob:
         if not 1 <= request.reference_count <= MAX_REFERENCE_IMAGES:
             raise ValueError(f"reference_count must be between 1 and {MAX_REFERENCE_IMAGES}.")
+        if request.backend == Backend.HUGGING_FACE:
+            # The one choke point shared by the CLI, the UI and agents: only a catalogued
+            # LoRA, and only the one trained on this game's art.
+            resolve_lora(request.lora_name, request.game)
         ws = self.workspace(request.game)
         references, descriptions = self._select_references(
             ws, request.prompt, request.reference_count
         )
-        prompt = self.director.brief(request, ws)
+        prompt = build_prompt(request, descriptions)
         job = ArtJob(
             game=request.game,
             prompt=request.prompt,
@@ -94,8 +142,10 @@ class ConceptArtWorkflow:
                 request.lora_scale,
                 request.scheduler,
                 request.base_model,
+                request.background_model,
             ),
             job,
+            lambda backend: build_prompt(request, descriptions, backend),
         )
         if request.transparent:
             self.gate.require_transparency(rendered.png)
@@ -171,12 +221,16 @@ class ConceptArtWorkflow:
             seed=parameters.get("seed"),
             steps=int(parameters.get("steps", 28)),
             guidance_scale=float(parameters.get("guidance_scale", 4.0)),
-            lora_scale=float(parameters.get("lora_scale", 0.8)),
+            lora_scale=float(parameters.get("lora_scale", 1.25)),
             scheduler=parameters.get("scheduler"),
             base_model=parameters.get("base_model"),
+            background_model=str(
+                parameters.get("background_model") or DEFAULT_BACKGROUND_MODEL
+            ),
         )
+        # The HF final must replay the approved draft's prompt byte for byte.
         draft_prompt = job.artifacts.get("draft", {}).get("prompt")
-        prompt = str(draft_prompt or self.director.brief(request, ws))
+        prompt = str(draft_prompt or build_prompt(request, job.reference_descriptions))
         if request.backend == Backend.GPT_IMAGE_2:
             prompt += " Final-quality, 2K deliverable preserving the approved concept."
         render_references = references
@@ -201,8 +255,10 @@ class ConceptArtWorkflow:
                 request.lora_scale,
                 request.scheduler,
                 request.base_model,
+                request.background_model,
             ),
             job,
+            lambda backend: build_prompt(request, job.reference_descriptions, backend),
         )
         if job.transparent:
             self.gate.require_transparency(rendered.png)
@@ -219,6 +275,7 @@ class ConceptArtWorkflow:
                     "seed",
                     "scheduler",
                     "base_model",
+                    "background_model",
                 )
             }
             original = {key: parameters.get(key) for key in replayed}
@@ -287,10 +344,31 @@ class ConceptArtWorkflow:
     def get_job(self, game: str, job_id: str) -> ArtJob:
         return ArtJob.load(self.workspace(game).job_file(job_id))
 
+    def games(self) -> list[str]:
+        """Every game that already owns an isolated workspace folder."""
+        container = self.root / "games"
+        if not container.exists():
+            return []
+        return sorted(path.name for path in container.iterdir() if path.is_dir())
+
+    def list_jobs(self, game: str) -> list[ArtJob]:
+        """This game's jobs, newest first; used by the CLI, the UI and agents."""
+        ws = self.workspace(game)
+        jobs = [ArtJob.load(path) for path in (ws.path / "jobs").glob("*.json")]
+        return sorted(jobs, key=lambda job: job.created_at, reverse=True)
+
     def _render(
-        self, requested: Backend, spec: RenderSpec, job: ArtJob
+        self,
+        requested: Backend,
+        spec: RenderSpec,
+        job: ArtJob,
+        rebuild_prompt: Callable[[Backend], str] | None = None,
     ) -> tuple[RenderedImage, Backend]:
-        """Use HF first; retry with game-local GPT Image 2 references when it fails."""
+        """Use HF first; retry with game-local GPT Image 2 references when it fails.
+
+        The fallback rebuilds the prompt for GPT Image 2: the LoRA trigger word means nothing
+        to it, and it needs the reference-derived style instead.
+        """
         try:
             return self.providers[requested].render(spec), requested
         except Exception as error:
@@ -301,7 +379,9 @@ class ConceptArtWorkflow:
                     "HF failed and no game-local references are available for GPT fallback."
                 ) from error
             fallback_spec = RenderSpec(
-                prompt=spec.prompt,
+                prompt=(
+                    rebuild_prompt(Backend.GPT_IMAGE_2) if rebuild_prompt else spec.prompt
+                ),
                 references=spec.references,
                 width=spec.width,
                 height=spec.height,
@@ -314,6 +394,7 @@ class ConceptArtWorkflow:
                 lora_scale=spec.lora_scale,
                 scheduler=spec.scheduler,
                 base_model=spec.base_model,
+                background_model=spec.background_model,
             )
             job.notes.append(
                 f"Hugging Face failed ({type(error).__name__}); retried with GPT Image 2."

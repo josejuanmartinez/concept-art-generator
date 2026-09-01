@@ -50,10 +50,11 @@ def test_hugging_face_maps_options_and_returns_replayable_parameters(
         "negative_prompt": "blurry",
         "steps": 28,
         "guidance_scale": 4.0,
-        "lora_scale": 0.8,
+        "lora_scale": 1.25,
         "seed": 42,
         "scheduler": "FlowMatchEulerDiscreteScheduler",
         "base_model": "Qwen/Qwen-Image-2512",
+        "background_model": "birefnet-general",
     }
 
     def fake_post(url, *, json, headers, timeout):
@@ -93,7 +94,8 @@ def test_hugging_face_maps_options_and_returns_replayable_parameters(
     assert captured["payload"]["remove_background"] is transparent
     assert captured["payload"]["upscale_to_2k"] is upscale
     assert captured["payload"]["guidance_scale"] == 4.0
-    assert captured["payload"]["lora_scale"] == 0.8
+    assert captured["payload"]["lora_scale"] == 1.25
+    assert captured["payload"]["background_model"] == "birefnet-general"
     assert captured["payload"]["negative_prompt"] == "blurry"
     assert captured["payload"]["steps"] == 28
     assert captured["payload"]["seed"] == 42

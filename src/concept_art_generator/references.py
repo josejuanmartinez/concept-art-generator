@@ -5,10 +5,47 @@ import json
 import mimetypes
 import os
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Protocol
 
 MAX_REFERENCE_IMAGES = 16
+
+# The Qwen Image LoRA Studio dataset convention: `cammy.txt` captions `cammy.png`.
+# Here the same files set reference descriptions instead of training captions.
+CAPTION_SUFFIX = ".txt"
+
+
+def sidecar_caption(image_path: Path) -> str | None:
+    """A caption .txt sitting beside the image, as the studio writes them."""
+    neighbour = image_path.with_suffix(CAPTION_SUFFIX)
+    if not neighbour.is_file():
+        return None
+    try:
+        return neighbour.read_text(encoding="utf-8").strip() or None
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def load_caption_sidecars(paths: Iterable[Path]) -> dict[str, str]:
+    """Map lowercased file stem -> caption text for a batch of uploaded .txt files."""
+    captions: dict[str, str] = {}
+    for path in paths:
+        candidate = Path(path)
+        if candidate.suffix.lower() != CAPTION_SUFFIX:
+            continue
+        try:
+            text = candidate.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if text:
+            captions[candidate.stem.lower()] = text
+    return captions
+
+
+def caption_for(filename: str, sidecars: dict[str, str]) -> str | None:
+    """Match one image filename against loaded .txt captions by lowercased stem."""
+    return sidecars.get(Path(filename).stem.lower())
 
 
 class ReferenceAgent(Protocol):

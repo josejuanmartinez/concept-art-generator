@@ -68,7 +68,9 @@ def test_hugging_face_failure_falls_back_to_game_local_gpt(tmp_path: Path):
     reference(source)
     flow.add_reference("massive-warfare", source, "Red artillery vehicle concept art")
     job = flow.create_draft(
-        ArtRequest("massive-warfare", "artillery vehicle", Backend.HUGGING_FACE, "mw-v1")
+        ArtRequest(
+            "massive-warfare", "artillery vehicle", Backend.HUGGING_FACE, "jjmcarrascosa/pilot-mw"
+        )
     )
     assert any("retried with GPT Image 2" in note for note in job.notes)
 
@@ -178,6 +180,7 @@ def test_hf_final_replays_approved_1024_parameters_and_only_adds_upscale(tmp_pat
                 "seed": spec.seed,
                 "scheduler": "FlowMatchEulerDiscreteScheduler",
                 "base_model": "Qwen/Qwen-Image-2512",
+                "background_model": spec.background_model,
             }
             return RenderedImage(
                 rendered.png, rendered.estimated_cost_usd, rendered.provider_request_id, parameters
@@ -193,7 +196,7 @@ def test_hf_final_replays_approved_1024_parameters_and_only_adds_upscale(tmp_pat
             "massive-warfare",
             "tracked artillery",
             Backend.HUGGING_FACE,
-            "owner/game-style",
+            "jjmcarrascosa/pilot-mw",
             seed=42,
             negative_prompt="blurry",
         )
@@ -209,7 +212,8 @@ def test_hf_final_replays_approved_1024_parameters_and_only_adds_upscale(tmp_pat
     assert final.negative_prompt == draft.negative_prompt == "blurry"
     assert final.steps == draft.steps == 28
     assert final.guidance_scale == draft.guidance_scale == 4.0
-    assert final.lora_scale == draft.lora_scale == 0.8
+    assert final.lora_scale == draft.lora_scale == 1.25
+    assert final.background_model == draft.background_model == "birefnet-general"
     assert final.scheduler == "FlowMatchEulerDiscreteScheduler"
     assert final.base_model == "Qwen/Qwen-Image-2512"
 

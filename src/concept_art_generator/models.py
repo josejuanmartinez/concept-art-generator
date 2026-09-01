@@ -6,6 +6,10 @@ from enum import StrEnum
 from pathlib import Path
 from uuid import uuid4
 
+# The Space's own default segmentation model; it is sent explicitly so a change of
+# server-side default never silently alters a game's cutouts.
+DEFAULT_BACKGROUND_MODEL = "birefnet-general"
+
 
 def now() -> str:
     return datetime.now(UTC).isoformat()
@@ -36,9 +40,10 @@ class ArtRequest:
     seed: int | None = None
     steps: int = 28
     guidance_scale: float = 4.0
-    lora_scale: float = 0.8
+    lora_scale: float = 1.25
     scheduler: str | None = None
     base_model: str | None = None
+    background_model: str = DEFAULT_BACKGROUND_MODEL
 
 
 @dataclass(slots=True)
