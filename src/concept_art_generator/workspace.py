@@ -2,23 +2,26 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from pathlib import Path
+
+from .art_models import resolve_model
 
 
 class IsolationError(ValueError):
     pass
 
 
-class GameWorkspace:
-    """Owns every path used by one game; no provider receives other-game references."""
+class ModelWorkspace:
+    """Owns every path used by one art model; no provider receives another model's references."""
 
-    def __init__(self, root: Path, game: str):
-        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", game):
-            raise IsolationError("Game must be a lowercase slug (letters, numbers, hyphens).")
+    def __init__(self, root: Path, art_model: str):
+        try:
+            self.model = resolve_model(art_model)
+        except ValueError as error:
+            raise IsolationError(str(error)) from error
         self.root = root.resolve()
-        self.game = game
-        self.path = (self.root / "games" / game).resolve()
+        self.art_model = self.model.name
+        self.path = (self.root / "models" / self.model.name).resolve()
         if self.root not in self.path.parents:
             raise IsolationError("Invalid workspace path.")
         for name in ("references", "jobs", "drafts", "approved", "finals"):

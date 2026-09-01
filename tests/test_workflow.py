@@ -21,15 +21,15 @@ def test_final_requires_explicit_approval(tmp_path: Path):
     flow = workflow(tmp_path)
     source = tmp_path / "reference.png"
     reference(source)
-    flow.add_reference("massive-warfare", source, "Red armored vehicle concept art")
-    job = flow.create_draft(ArtRequest("massive-warfare", "artillery vehicle", Backend.GPT_IMAGE_2))
+    flow.add_reference("pilot-mw", source, "Red armored vehicle concept art")
+    job = flow.create_draft(ArtRequest("pilot-mw", "artillery vehicle", Backend.GPT_IMAGE_2))
     assert job.state == JobState.DRAFT_READY
     with pytest.raises(ValueError, match="Human approval"):
-        flow.create_final("massive-warfare", job.id)
-    flow.approve("massive-warfare", job.id)
+        flow.create_final("pilot-mw", job.id)
+    flow.approve("pilot-mw", job.id)
     draft_sidecar = Path(job.draft_path).with_suffix(".png.prompt")
     assert json.loads(draft_sidecar.read_text())["feedback"][0]["decision"] == "approved"
-    final = flow.create_final("massive-warfare", job.id)
+    final = flow.create_final("pilot-mw", job.id)
     assert final.state == JobState.FINAL_READY
     assert Path(final.final_path).exists()
     assert max(Image.open(final.final_path).size) == 2048
@@ -40,17 +40,17 @@ def test_rejection_feedback_is_written_to_draft_sidecar(tmp_path: Path):
     flow = workflow(tmp_path)
     source = tmp_path / "reference.png"
     reference(source)
-    flow.add_reference("battle-cars", source, "Red battle car concept art")
-    job = flow.create_draft(ArtRequest("battle-cars", "pilot", Backend.GPT_IMAGE_2))
+    flow.add_reference("drone-bc", source, "Red battle car concept art")
+    job = flow.create_draft(ArtRequest("drone-bc", "pilot", Backend.GPT_IMAGE_2))
     rejected = flow.reject(
-        "battle-cars", job.id, "Make the silhouette wider and remove the spoiler."
+        "drone-bc", job.id, "Make the silhouette wider and remove the spoiler."
     )
     sidecar = json.loads(Path(rejected.draft_path).with_suffix(".png.prompt").read_text())
     assert rejected.state == JobState.REJECTED
     assert sidecar["feedback"][0]["feedback"].startswith("Make the silhouette")
 
 
-def test_hugging_face_failure_falls_back_to_game_local_gpt(tmp_path: Path):
+def test_hugging_face_failure_falls_back_to_the_models_own_gpt_references(tmp_path: Path):
     class FailingHuggingFace(DeterministicProvider):
         backend = Backend.HUGGING_FACE
 
@@ -66,24 +66,22 @@ def test_hugging_face_failure_falls_back_to_game_local_gpt(tmp_path: Path):
     )
     source = tmp_path / "reference.png"
     reference(source)
-    flow.add_reference("massive-warfare", source, "Red artillery vehicle concept art")
+    flow.add_reference("pilot-mw", source, "Red artillery vehicle concept art")
     job = flow.create_draft(
-        ArtRequest(
-            "massive-warfare", "artillery vehicle", Backend.HUGGING_FACE, "jjmcarrascosa/pilot-mw"
-        )
+        ArtRequest("pilot-mw", "artillery vehicle", Backend.HUGGING_FACE)
     )
     assert any("retried with GPT Image 2" in note for note in job.notes)
 
 
-def test_game_references_are_isolated(tmp_path: Path):
+def test_art_model_references_are_isolated(tmp_path: Path):
     flow = workflow(tmp_path)
     first, second = tmp_path / "mw.png", tmp_path / "bc.png"
     reference(first)
     reference(second)
-    flow.add_reference("massive-warfare", first, "Massive Warfare vehicle")
-    flow.add_reference("battle-cars", second, "Battle Cars vehicle")
-    assert len(flow.workspace("massive-warfare").reference_files(10)) == 1
-    assert len(flow.workspace("battle-cars").reference_files(10)) == 1
+    flow.add_reference("pilot-mw", first, "Massive Warfare vehicle")
+    flow.add_reference("drone-bc", second, "Battle Cars vehicle")
+    assert len(flow.workspace("pilot-mw").reference_files(10)) == 1
+    assert len(flow.workspace("drone-bc").reference_files(10)) == 1
 
 
 def test_opaque_provider_is_rejected(tmp_path: Path):
@@ -101,9 +99,9 @@ def test_opaque_provider_is_rejected(tmp_path: Path):
     flow = ConceptArtWorkflow(tmp_path, {Backend.GPT_IMAGE_2: Opaque()})
     source = tmp_path / "reference.png"
     reference(source)
-    flow.add_reference("battle-cars", source, "Red pilot reference")
+    flow.add_reference("drone-bc", source, "Red pilot reference")
     with pytest.raises(ValueError, match="opaque"):
-        flow.create_draft(ArtRequest("battle-cars", "pilot", Backend.GPT_IMAGE_2))
+        flow.create_draft(ArtRequest("drone-bc", "pilot", Backend.GPT_IMAGE_2))
 
 
 def test_more_than_16_references_are_selected_by_description_and_persisted(tmp_path: Path):
@@ -127,15 +125,15 @@ def test_more_than_16_references_are_selected_by_description_and_persisted(tmp_p
     for index in range(18):
         source = tmp_path / f"ref-{index:02}.png"
         reference(source)
-        flow.add_reference("massive-warfare", source, f"Reference description {index}")
+        flow.add_reference("pilot-mw", source, f"Reference description {index}")
 
-    job = flow.create_draft(ArtRequest("massive-warfare", "tracked artillery", Backend.GPT_IMAGE_2))
+    job = flow.create_draft(ArtRequest("pilot-mw", "tracked artillery", Backend.GPT_IMAGE_2))
 
     assert len(agent.candidates) == 18
     assert len(job.reference_files) == 16
     assert job.reference_files[0] == "ref-17.png"
     assert list(job.reference_descriptions) == job.reference_files
-    persisted = json.loads(flow.workspace(job.game).job_file(job.id).read_text())
+    persisted = json.loads(flow.workspace(job.art_model).job_file(job.id).read_text())
     assert persisted["reference_files"] == job.reference_files
 
 
@@ -154,9 +152,9 @@ def test_missing_description_is_generated_and_saved(tmp_path: Path):
     )
     source = tmp_path / "reference.png"
     reference(source)
-    target = flow.add_reference("battle-cars", source)
+    target = flow.add_reference("drone-bc", source)
 
-    descriptions = flow.workspace("battle-cars").reference_descriptions()
+    descriptions = flow.workspace("drone-bc").reference_descriptions()
     assert descriptions[target.name] == "GPT description for reference.png"
 
 
@@ -190,19 +188,18 @@ def test_hf_final_replays_approved_1024_parameters_and_only_adds_upscale(tmp_pat
     flow = ConceptArtWorkflow(tmp_path, {Backend.HUGGING_FACE: provider})
     source = tmp_path / "reference.png"
     reference(source)
-    flow.add_reference("massive-warfare", source, "Tracked military vehicle")
+    flow.add_reference("pilot-mw", source, "Tracked military vehicle")
     job = flow.create_draft(
         ArtRequest(
-            "massive-warfare",
+            "pilot-mw",
             "tracked artillery",
             Backend.HUGGING_FACE,
-            "jjmcarrascosa/pilot-mw",
             seed=42,
             negative_prompt="blurry",
         )
     )
-    flow.approve(job.game, job.id)
-    flow.create_final(job.game, job.id)
+    flow.approve(job.art_model, job.id)
+    flow.create_final(job.art_model, job.id)
 
     draft, final = provider.specs
     assert (draft.width, draft.height) == (1024, 1024)
@@ -232,11 +229,11 @@ def test_gpt_final_uses_approved_draft_plus_at_most_15_style_references(tmp_path
     for index in range(16):
         source = tmp_path / f"reference-{index:02}.png"
         reference(source)
-        flow.add_reference("battle-cars", source, f"Combat car style reference {index}")
+        flow.add_reference("drone-bc", source, f"Combat car style reference {index}")
 
-    job = flow.create_draft(ArtRequest("battle-cars", "armored racer", Backend.GPT_IMAGE_2))
-    flow.approve(job.game, job.id)
-    flow.create_final(job.game, job.id)
+    job = flow.create_draft(ArtRequest("drone-bc", "armored racer", Backend.GPT_IMAGE_2))
+    flow.approve(job.art_model, job.id)
+    flow.create_final(job.art_model, job.id)
 
     draft, final = provider.specs
     assert len(draft.references) == 16

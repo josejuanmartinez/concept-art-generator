@@ -9,7 +9,7 @@ from pathlib import Path
 from PIL import Image
 
 from .agents import QualityGate
-from .loras import resolve_lora
+from .art_models import resolve_model
 from .models import DEFAULT_BACKGROUND_MODEL, ArtJob, ArtRequest, Backend, JobState
 from .prompts import build_prompt
 from .providers import (
@@ -27,11 +27,11 @@ from .references import (
     load_caption_sidecars,
     sidecar_caption,
 )
-from .workspace import GameWorkspace
+from .workspace import ModelWorkspace
 
 
 class ConceptArtWorkflow:
-    """Orchestrator: draft → explicit human approval → transparent final."""
+    """Orchestrator: draft → explicit human approval → transparent final, per art model."""
 
     def __init__(
         self,
@@ -48,12 +48,12 @@ class ConceptArtWorkflow:
         self.reference_agent = reference_agent or OpenAIReferenceAgent()
         self.gate = QualityGate()
 
-    def workspace(self, game: str) -> GameWorkspace:
-        return GameWorkspace(self.root, game)
+    def workspace(self, art_model: str) -> ModelWorkspace:
+        return ModelWorkspace(self.root, art_model)
 
     def add_reference(
         self,
-        game: str,
+        art_model: str,
         source: str | Path,
         description: str | None = None,
         *,
@@ -61,61 +61,92 @@ class ConceptArtWorkflow:
     ) -> Path:
         """Caption priority: the supplied text, then a sibling `.txt`, then GPT.
 
+        Adding a file this art model already holds is idempotent: the image is not duplicated,
+        and its stored caption is left alone unless you supply a new one. Re-adding a folder
+        therefore never overwrites hand-written captions, and never spends a GPT call on a
+        reference that already has a description.
+
         `describe_missing=False` stores an empty description instead of calling GPT, for the
         UI flow where a human captions the references by hand afterwards.
         """
         source = Path(source)
         if source.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
             raise ValueError("References must be PNG, JPG, JPEG or WebP.")
-        target = self.workspace(game).references / source.name
-        if target.exists() and target.read_bytes() != source.read_bytes():
+        workspace = self.workspace(art_model)
+        content = source.read_bytes()
+        target = workspace.references / source.name
+        if target.exists() and target.read_bytes() != content:
+            # A different image under a name this model already uses; keep both.
             target = target.with_stem(f"{source.stem}-{source.stat().st_size}")
-        target.write_bytes(source.read_bytes())
+        already_held = target.exists() and target.read_bytes() == content
+        stored = workspace.reference_descriptions().get(target.name, "").strip()
+        target.write_bytes(content)
+
         effective_description = (description or "").strip() or (sidecar_caption(source) or "")
+        if not effective_description and already_held and stored:
+            return target
         if not effective_description and describe_missing:
             effective_description = self.reference_agent.describe(target)
-        self.workspace(game).set_reference_description(target.name, effective_description)
+        workspace.set_reference_description(target.name, effective_description)
         return target
 
-    def reference_descriptions(self, game: str) -> dict[str, str]:
-        """Every reference filename for this game mapped to its stored description."""
-        ws = self.workspace(game)
+    def reference_descriptions(self, art_model: str) -> dict[str, str]:
+        """Every reference filename for this art model mapped to its stored description."""
+        ws = self.workspace(art_model)
         stored = ws.reference_descriptions()
         return {path.name: stored.get(path.name, "") for path in ws.reference_files()}
 
-    def set_reference_description(self, game: str, filename: str, description: str) -> None:
-        ws = self.workspace(game)
-        ws.reference_paths([filename])  # refuse a name that is not this game's reference
+    def set_reference_description(self, art_model: str, filename: str, description: str) -> None:
+        ws = self.workspace(art_model)
+        ws.reference_paths([filename])  # refuse a name that is not this model's reference
         ws.set_reference_description(filename, description)
 
-    def apply_caption_files(self, game: str, caption_paths: list[Path]) -> int:
+    def uncaptioned_references(self, art_model: str) -> list[str]:
+        """Reference filenames that still have no description."""
+        return [
+            name
+            for name, text in self.reference_descriptions(art_model).items()
+            if not text.strip()
+        ]
+
+    def describe_reference(self, art_model: str, filename: str) -> str:
+        """Ask the configured GPT model to describe one stored reference.
+
+        Captioning is a deliberate, separate step from adding images: nothing calls this unless
+        a human asks for it, so uploading references never blocks on the provider.
+        """
+        ws = self.workspace(art_model)
+        path = ws.reference_paths([filename])[0]
+        description = self.reference_agent.describe(path)
+        ws.set_reference_description(filename, description)
+        return description
+
+    def apply_caption_files(self, art_model: str, caption_paths: list[Path]) -> int:
         """Fill descriptions from uploaded `.txt` files matched by stem; returns matches."""
         sidecars = load_caption_sidecars(caption_paths)
         matched = 0
-        for filename in self.reference_descriptions(game):
+        for filename in self.reference_descriptions(art_model):
             text = caption_for(filename, sidecars)
             if text:
-                self.set_reference_description(game, filename, text)
+                self.set_reference_description(art_model, filename, text)
                 matched += 1
         return matched
 
     def create_draft(self, request: ArtRequest) -> ArtJob:
         if not 1 <= request.reference_count <= MAX_REFERENCE_IMAGES:
             raise ValueError(f"reference_count must be between 1 and {MAX_REFERENCE_IMAGES}.")
-        if request.backend == Backend.HUGGING_FACE:
-            # The one choke point shared by the CLI, the UI and agents: only a catalogued
-            # LoRA, and only the one trained on this game's art.
-            resolve_lora(request.lora_name, request.game)
-        ws = self.workspace(request.game)
+        # Choosing the art model chooses the LoRA; a slug is never supplied by a caller.
+        model = resolve_model(request.art_model)
+        ws = self.workspace(request.art_model)
         references, descriptions = self._select_references(
             ws, request.prompt, request.reference_count
         )
         prompt = build_prompt(request, descriptions)
         job = ArtJob(
-            game=request.game,
+            art_model=request.art_model,
             prompt=request.prompt,
             backend=request.backend,
-            lora_name=request.lora_name,
+            lora_name=model.lora_slug if request.backend == Backend.HUGGING_FACE else None,
             reference_hashes=ws.fingerprints_for(references),
             reference_files=[path.name for path in references],
             reference_descriptions=descriptions,
@@ -134,7 +165,7 @@ class ConceptArtWorkflow:
                 draft_size,
                 draft_size,
                 request.transparent,
-                request.lora_name,
+                job.lora_name,
                 seed,
                 request.negative_prompt,
                 request.steps,
@@ -166,8 +197,8 @@ class ConceptArtWorkflow:
         self._ledger(job, "draft")
         return job
 
-    def approve(self, game: str, job_id: str, feedback: str | None = None) -> ArtJob:
-        ws = self.workspace(game)
+    def approve(self, art_model: str, job_id: str, feedback: str | None = None) -> ArtJob:
+        ws = self.workspace(art_model)
         job = ArtJob.load(ws.job_file(job_id))
         if job.state != JobState.DRAFT_READY:
             raise ValueError(f"Only draft_ready jobs can be approved (current: {job.state}).")
@@ -181,8 +212,8 @@ class ConceptArtWorkflow:
         self._refresh_sidecars(ws, job)
         return job
 
-    def reject(self, game: str, job_id: str, feedback: str) -> ArtJob:
-        ws = self.workspace(game)
+    def reject(self, art_model: str, job_id: str, feedback: str) -> ArtJob:
+        ws = self.workspace(art_model)
         job = ArtJob.load(ws.job_file(job_id))
         if job.state != JobState.DRAFT_READY:
             raise ValueError(f"Only draft_ready jobs can be rejected (current: {job.state}).")
@@ -196,8 +227,8 @@ class ConceptArtWorkflow:
         self._refresh_sidecars(ws, job)
         return job
 
-    def create_final(self, game: str, job_id: str) -> ArtJob:
-        ws = self.workspace(game)
+    def create_final(self, art_model: str, job_id: str) -> ArtJob:
+        ws = self.workspace(art_model)
         job = ArtJob.load(ws.job_file(job_id))
         if job.state != JobState.APPROVED:
             raise ValueError("Human approval is required before final generation.")
@@ -211,7 +242,7 @@ class ConceptArtWorkflow:
                 "This HF draft has no replayable parameters. Generate a new draft before finalizing."
             )
         request = ArtRequest(
-            game,
+            art_model,
             job.prompt,
             draft_backend,
             job.lora_name,
@@ -305,11 +336,11 @@ class ConceptArtWorkflow:
         return job
 
     def _select_references(
-        self, ws: GameWorkspace, prompt: str, limit: int
+        self, ws: ModelWorkspace, prompt: str, limit: int
     ) -> tuple[list[Path], dict[str, str]]:
         candidates = ws.reference_files()
         if not candidates:
-            raise ValueError(f"{ws.game} has no references. Add them before generating.")
+            raise ValueError(f"{ws.art_model} has no references. Add them before generating.")
         metadata = ws.reference_descriptions()
         for path in candidates:
             if not metadata.get(path.name, "").strip():
@@ -327,7 +358,7 @@ class ConceptArtWorkflow:
         return references, descriptions
 
     @staticmethod
-    def _job_references(ws: GameWorkspace, job: ArtJob) -> list[Path]:
+    def _job_references(ws: ModelWorkspace, job: ArtJob) -> list[Path]:
         if job.reference_files:
             references = ws.reference_paths(job.reference_files)
         else:
@@ -341,19 +372,19 @@ class ConceptArtWorkflow:
             raise ValueError("A selected reference has changed since the draft was generated.")
         return references
 
-    def get_job(self, game: str, job_id: str) -> ArtJob:
-        return ArtJob.load(self.workspace(game).job_file(job_id))
+    def get_job(self, art_model: str, job_id: str) -> ArtJob:
+        return ArtJob.load(self.workspace(art_model).job_file(job_id))
 
-    def games(self) -> list[str]:
-        """Every game that already owns an isolated workspace folder."""
-        container = self.root / "games"
+    def art_models(self) -> list[str]:
+        """Every art model that already owns an isolated workspace folder."""
+        container = self.root / "models"
         if not container.exists():
             return []
         return sorted(path.name for path in container.iterdir() if path.is_dir())
 
-    def list_jobs(self, game: str) -> list[ArtJob]:
-        """This game's jobs, newest first; used by the CLI, the UI and agents."""
-        ws = self.workspace(game)
+    def list_jobs(self, art_model: str) -> list[ArtJob]:
+        """This model's jobs, newest first; used by the CLI, the UI and agents."""
+        ws = self.workspace(art_model)
         jobs = [ArtJob.load(path) for path in (ws.path / "jobs").glob("*.json")]
         return sorted(jobs, key=lambda job: job.created_at, reverse=True)
 
@@ -364,7 +395,7 @@ class ConceptArtWorkflow:
         job: ArtJob,
         rebuild_prompt: Callable[[Backend], str] | None = None,
     ) -> tuple[RenderedImage, Backend]:
-        """Use HF first; retry with game-local GPT Image 2 references when it fails.
+        """Use HF first; retry with the model's own GPT Image 2 references when it fails.
 
         The fallback rebuilds the prompt for GPT Image 2: the LoRA trigger word means nothing
         to it, and it needs the reference-derived style instead.
@@ -376,7 +407,7 @@ class ConceptArtWorkflow:
                 raise
             if not spec.references:
                 raise RuntimeError(
-                    "HF failed and no game-local references are available for GPT fallback."
+                    "HF failed and no references are available for this art model's GPT fallback."
                 ) from error
             fallback_spec = RenderSpec(
                 prompt=(
@@ -404,7 +435,7 @@ class ConceptArtWorkflow:
     def _ledger(self, job: ArtJob, stage: str) -> None:
         record = {
             "job_id": job.id,
-            "game": job.game,
+            "art_model": job.art_model,
             "stage": stage,
             "backend": job.backend,
             "cost_usd": job.cost_usd,
@@ -429,14 +460,14 @@ class ConceptArtWorkflow:
             "dimensions": dimensions,
         }
 
-    def _write_sidecar(self, ws: GameWorkspace, job: ArtJob, stage: str) -> None:
+    def _write_sidecar(self, ws: ModelWorkspace, job: ArtJob, stage: str) -> None:
         image_path = Path(job.draft_path if stage == "draft" else job.final_path or "")
         if not image_path.exists():
             return
         payload = {
             **job.artifacts[stage],
             "job_id": job.id,
-            "game": job.game,
+            "art_model": job.art_model,
             "requested_backend": str(job.backend),
             "lora_name": job.lora_name,
             "reference_hashes": job.reference_hashes,
@@ -449,6 +480,6 @@ class ConceptArtWorkflow:
         }
         ws.sidecar_path(image_path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    def _refresh_sidecars(self, ws: GameWorkspace, job: ArtJob) -> None:
+    def _refresh_sidecars(self, ws: ModelWorkspace, job: ArtJob) -> None:
         for stage in job.artifacts:
             self._write_sidecar(ws, job, stage)

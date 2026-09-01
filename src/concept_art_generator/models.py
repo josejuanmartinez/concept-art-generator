@@ -29,10 +29,9 @@ class JobState(StrEnum):
 
 @dataclass(slots=True)
 class ArtRequest:
-    game: str
+    art_model: str
     prompt: str
     backend: Backend
-    lora_name: str | None = None
     reference_count: int = 16
     logo_path: str | None = None
     transparent: bool = True
@@ -48,7 +47,7 @@ class ArtRequest:
 
 @dataclass(slots=True)
 class ArtJob:
-    game: str
+    art_model: str
     prompt: str
     backend: str
     id: str = field(default_factory=lambda: uuid4().hex[:12])

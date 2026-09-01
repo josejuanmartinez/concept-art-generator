@@ -2,7 +2,7 @@
 
 ![TinyBytes Art Pipeline — isolated references, two generation backends (HF LoRA or GPT Image 2), human approval, transparent 2K finals](docs/art-pipeline.png)
 
-A production-minded TinyBytes assessment project: create game-specific concept art without mixing visual references between **Massive Warfare** and **Battle Cars**. It uses a human approval gate: **low-resolution draft → explicit approval → transparent final**.
+A production-minded TinyBytes assessment project: concept art organised by **art model** — a named visual style that owns its own reference images and its own trained private LoRA. Three exist (`drone-bc`, `pilot-bc`, `pilot-mw`) and their references never mix. Every asset passes a human approval gate: **low-resolution draft → explicit approval → transparent final**.
 
 ## Architecture
 
@@ -11,29 +11,29 @@ core. The agent path is optional: the UI and the CLI involve no Claude at all.
 
 ```text
   Agent (Claude Code)          UI (concept-art-ui)          CLI (concept-art)
-  ├─ style-director            browser forms, job           subcommands printing
-  ├─ technical-artist          pages, reference             JSON on stdout
-  └─ verifier                  library + JSON API
+  ├─ style-director            Gradio: References tab       subcommands printing
+  ├─ technical-artist          (gallery + captions) and     JSON on stdout
+  └─ verifier                  Generate tab (+ approval)
          │                             │                            │
          └──────────────┬──────────────┴────────────────────────────┘
                         ▼
                  ConceptArtWorkflow
-      game isolation · LoRA catalogue · draft → approved → final
-      transparency gate · provenance sidecars · usage ledger
+    art-model isolation · trigger words · draft → approved → final
+    transparency gate · provenance sidecars · usage ledger
                  │                          │
-          GPT Image 2                HF Space + named LoRA
+          GPT Image 2                HF Space + this model's LoRA
           reference edit             replayable JSON API
 ```
 
 `ConceptArtWorkflow` is the only place a job is created, approved, or exported, so every rule below
 holds identically no matter which of the three entry points you use.
 
-- **Isolation:** each game lives under `data/games/<game>/`; references are selected only from that folder and hashes are recorded in each job. There is no global reference pool.
+- **Isolation:** each art model lives under `data/models/<art-model>/`; references are selected only from that folder and hashes are recorded in each job. There is no global reference pool.
 - **Human oversight:** `final` refuses all non-approved jobs.
-- **Bounded LoRA choice:** exactly three trained LoRAs exist and each is bound to one game; anything else is refused rather than guessed.
+- **Bounded model choice:** exactly three art models exist. Choosing one chooses its LoRA, so a slug is never typed or guessed; anything else is refused at the CLI, the API and the workspace.
 - **Transparency:** both providers are asked for transparent output and a verifier rejects opaque PNGs before export.
 - **Cost hygiene:** each paid stage appends a record to `data/usage.jsonl`; secrets are environment variables and never committed.
-- **Providers:** GPT Image 2 uses the image-edit endpoint with up to 16 game-local references. Each reference has a stored description; GPT creates it through the Responses API when one is not supplied. If more than 16 references exist, GPT ranks their descriptions against the art request and the best 16 are attached. The HF backend calls the private Qwen Image LoRA Studio's `/v1/generate` endpoint and persists the returned replay parameters. GPT Image 2 supports image input/output through image endpoints, per [official OpenAI documentation](https://developers.openai.com/api/docs/models/gpt-image-2).
+- **Providers:** GPT Image 2 uses the image-edit endpoint with up to 16 of the art model's own references. Each reference has a stored description; GPT creates it through the Responses API when one is not supplied. If more than 16 references exist, GPT ranks their descriptions against the art request and the best 16 are attached. The HF backend calls the private Qwen Image LoRA Studio's `/v1/generate` endpoint and persists the returned replay parameters. GPT Image 2 supports image input/output through image endpoints, per [official OpenAI documentation](https://developers.openai.com/api/docs/models/gpt-image-2).
 
 The final pass exports 2048×2048. The Hugging Face path repeats the approved 1024×1024 generation parameters and enables the Space's Swin2SR x2 upscaler; GPT Image 2 generates its high-quality 2K final directly.
 
@@ -154,23 +154,25 @@ job JSON, `.png.prompt` sidecars, `data/usage.jsonl`, output metadata, UI respon
 - Rotate a key immediately if it is exposed.
 - Keep invoices in the provider accounts; `data/usage.jsonl` is the local usage log.
 
-## The three LoRAs
+## The three art models
 
-Exactly three trained LoRAs exist. They are listed in `src/concept_art_generator/loras.py`, which is
-the single place to edit when one is trained, added, or retired. A slug is **never** inferred from a
-game slug, job name, folder, or an example in this file — anything outside the table is refused.
+An **art model** is the unit of work: a named visual style that owns its reference images and its
+trained private LoRA. Exactly three exist, listed in `src/concept_art_generator/art_models.py`,
+which is the single place to edit when one is trained, added, or retired. Everything else is
+refused — the CLI restricts the argument, the API returns 404, and the workspace will not open a
+folder for it.
 
-| LoRA | Trigger | Game | Subject | Style keywords |
+| Art model | Trigger | LoRA it uses | Subject | Style keywords |
 |---|---|---|---|---|
-| `jjmcarrascosa/drone-bc` | `drone-bc` | `battle-cars` | A drone | stylized 3D rendered game asset, glossy cel-shaded surfaces |
-| `jjmcarrascosa/pilot-bc` | `pilot-bc` | `battle-cars` | A pilot | flat vector game art |
-| `jjmcarrascosa/pilot-mw` | `pilot-mw` | `massive-warfare` | A pilot | semi-realistic painted digital game art, soft rim lighting |
+| `drone-bc` | `drone-bc` | `jjmcarrascosa/drone-bc` | A drone | stylized 3D rendered game asset, glossy cel-shaded surfaces |
+| `pilot-bc` | `pilot-bc` | `jjmcarrascosa/pilot-bc` | A pilot | flat vector game art |
+| `pilot-mw` | `pilot-mw` | `jjmcarrascosa/pilot-mw` | A pilot | semi-realistic painted digital game art, soft rim lighting |
 
-Each LoRA may only be used for the game it was trained on; using `drone-bc` for `massive-warfare` is
-refused, because that is exactly the cross-game style leak this project exists to prevent. GPT Image
-2 takes no LoRA at all — it uses the game's own reference images.
+The art model name is also the LoRA's trigger word, so you never type a slug: picking `drone-bc`
+picks `jjmcarrascosa/drone-bc`. GPT Image 2 takes no LoRA at all — it uses the same art model's own
+reference images instead.
 
-Run `concept-art loras` for the catalogue as JSON, including each example prompt in full. See
+Run `concept-art models` for the catalogue as JSON, including each example prompt in full. See
 [Prompt building](#prompt-building) for the shape a LoRA prompt must take.
 
 ## Prompt building
@@ -206,33 +208,33 @@ to GPT Image 2.
 
 `jjmcarrascosa/drone-bc`
 
-> A drone with a smooth white and grey egg-shaped shell, lime green thruster rings on each side, a
+> drone-bc A drone with a smooth white and grey egg-shaped shell, lime green thruster rings on each side, a
 > glowing orange vent slot on its face, two upright yellow-tipped blade fins above and one below,
 > stylized 3D rendered game asset, glossy cel-shaded surfaces, plain white background
 
 `jjmcarrascosa/pilot-bc`
 
-> A pilot in a horned imp mask and hood, wearing a green graffiti-covered hooded jacket and dark
+> pilot-bc A pilot in a horned imp mask and hood, wearing a green graffiti-covered hooded jacket and dark
 > cargo trousers, holding a curved black blade, in colourful high-top sneakers, full body, flat
 > vector game art, plain white background
 
 `jjmcarrascosa/pilot-mw`
 
-> A pilot undead soldier with a blazing skull head wreathed in orange fire, heavy charcoal combat
+> pilot-mw A pilot undead soldier with a blazing skull head wreathed in orange fire, heavy charcoal combat
 > armour lined with glowing orange lights, a rifle held at his hip, semi-realistic painted digital
 > game art, soft rim lighting, plain white background
 
 ### GPT Image 2 — our own style-director prompt from the references
 
 There is no LoRA and no trigger word here, so **none of the caption shape above applies**. GPT Image
-2 gets our own style-director prompt instead: the game's reference images are attached to the edit
+2 gets our own style-director prompt instead: the art model's reference images are attached to the edit
 request, and the style descriptions extracted from those references are restated in the prompt as
 notes, so the requirement is explicit rather than implied. Write a plain subject line and let the
 references carry the style.
 
 ```text
-Concept art for battle-cars. Subject: An armored street racer. Match only the visual language
-of the attached reference images for this game: silhouette discipline, materials, palette,
+Concept art. Subject: An armored street racer. Match only the visual language
+of the attached reference images: silhouette discipline, materials, palette,
 lighting and rendering style. Style extracted from those references:
 - White egg-shaped drone shell with lime thruster rings
 - Orange armoured hull panel, glossy cel-shaded
@@ -247,36 +249,51 @@ final replays the approved draft's prompt byte for byte.
 
 ## References and captions
 
-Every reference lives under `data/games/<game>/references/`, and each one carries a text description
-stored in `descriptions.json`. Descriptions are not decoration: when a game has more than 16
-references, GPT ranks these descriptions against the art request and picks the 16 to attach, so
-specific captions produce better drafts.
+Every reference lives under `data/models/<art-model>/references/`, and each one carries a text
+description stored in `descriptions.json`. Descriptions are not decoration: when a model has more
+than 16 references, GPT ranks these descriptions against the art request and picks the 16 to
+attach, so specific captions produce better drafts.
 
 Captions follow the **Qwen Image LoRA Studio dataset convention** — `drone.txt` captions
 `drone.png`, matched by filename — used here to set reference descriptions rather than training
-captions. There are four ways to caption a reference, in priority order:
+captions. **Every caption belongs to one image**; there is deliberately no shared or blanket
+description, because identical text across many references would make the 16-of-N ranking above
+arbitrary and would say nothing in the job's provenance record.
 
-1. **Typed text** — the description argument on the CLI, or the shared-description field in the UI.
-2. **A `.txt` file** — a sibling next to the image on the CLI, or uploaded alongside the images in
-   the UI, matched by filename stem.
-3. **By hand afterwards** — the UI's reference library at `/references/<game>` shows every image
-   with an editable description box.
-4. **GPT** — when nothing above supplies one, the configured GPT model writes it
-   (needs `OPENAI_API_KEY`). In the UI this is the *Describe with GPT* option; choose *Leave blank*
-   to caption by hand instead and avoid the API call entirely.
+**Adding images and captioning them are separate steps.** Adding a reference only stores the file;
+it never contacts a provider, so uploading a folder is instant and no caption is invented for an
+image you have not looked at. Captions arrive afterwards, in whichever way suits you:
+
+1. **A `.txt` file** — a sibling next to the image on the CLI, or uploaded through *Add caption .txt
+   files* in the UI, matched by filename stem.
+2. **By hand** — the UI's **References** tab shows every image in a gallery with an editable
+   description box under each thumbnail; *Save captions on this page* persists them.
+3. **GPT, on request** — press *Describe blank ones with GPT* in the UI (needs `OPENAI_API_KEY`).
+   It only touches references that are still empty, so hand-written and `.txt` captions are never
+   overwritten, and it shows a progress bar because each image is a separate API call.
+
+The CLI's `add-reference` is the exception, and deliberately so: it handles one image at a time, so
+`concept-art add-reference drone-bc drone.png "Egg-shaped white drone shell"` takes the caption
+inline, and omitting it falls back to a sibling `drone.txt` and then to GPT.
+
+Adding a reference the art model already holds is idempotent: the image is not duplicated, and its
+caption is left alone unless you supply a new one — so re-adding a folder never overwrites what you
+wrote by hand, and never spends a GPT call on a reference that already has a description. A
+different image arriving under a name the model already uses is kept alongside it, not silently
+replaced.
 
 ## Running a generation
 
 The pipeline is the same in all three places, and both backends are available in all three:
 
-| | Agent | UI | Command line |
+| | Agent | UI (Gradio) | Command line |
 |---|---|---|---|
-| Add references | `concept-art add-reference` | reference form on `/` | `concept-art add-reference` |
-| Caption references | `.txt` sibling or argument | caption editor + `.txt` upload | `.txt` sibling or argument |
-| GPT Image 2 draft | `--backend gpt-image-2` | backend dropdown | `--backend gpt-image-2` |
-| Hugging Face draft | `--backend huggingface --lora-name` | backend + LoRA dropdowns | `--backend huggingface --lora-name` |
-| Approve / reject | `concept-art approve` / `reject` | buttons on the job page | `concept-art approve` / `reject` |
-| 2K final | `concept-art final` | **Export 2K final** button | `concept-art final` |
+| Add references | `concept-art add-reference` | **References** tab | `concept-art add-reference` |
+| Caption references | `.txt` sibling or argument | caption boxes, `.txt` upload, or *Describe blank ones with GPT* | `.txt` sibling or argument |
+| GPT Image 2 draft | `--backend gpt-image-2` | **Generate** tab, backend radio | `--backend gpt-image-2` |
+| Hugging Face draft | `--backend huggingface` | **Generate** tab, backend radio | `--backend huggingface` |
+| Approve / reject | `concept-art approve` / `reject` | **Approve draft** / **Request changes** | `concept-art approve` / `reject` |
+| 2K final | `concept-art final` | **Export 2K final** (locked until approved) | `concept-art final` |
 
 ### 1. From an agent
 
@@ -284,30 +301,30 @@ The pipeline is the same in all three places, and both backends are available in
 Code and ask in natural language:
 
 ```text
-Generate concept art for battle-cars using jjmcarrascosa/drone-bc:
+Generate concept art with the drone-bc model:
 a drone with a squat black and orange armoured hull, twin stubby side thrusters glowing cyan.
 ```
 
 ```text
-Generate concept art for massive-warfare with GPT Image 2:
+Generate concept art with the pilot-mw model using GPT Image 2:
 an undead artillery gunner in heavy charcoal armour.
 ```
 
 The orchestrator then:
 
-1. Confirms the single game slug in scope. It never reads, attaches, summarizes, or transmits
-   another game's references.
-2. For Hugging Face, asks which of the three LoRAs to use if you have not said. It never invents a
-   fourth.
-3. Delegates planning to `style-director` (read-only, game-scoped).
+1. Confirms which single art model is in scope. It never reads, attaches, summarizes, or transmits
+   another model's references.
+2. Asks which of the three models to use if you have not said. It never invents a fourth, and it
+   never types a LoRA slug — the model determines it.
+3. Delegates planning to `style-director` (read-only, scoped to that model).
 4. Has `technical-artist` produce one 1024×1024 draft, then stops.
-5. Waits for your explicit approval — `concept-art approve <game> <job-id>` — or a rejection with
+5. Waits for your explicit approval — `concept-art approve <art-model> <job-id>` — or a rejection with
    feedback.
 6. Delegates the final export, then invokes `verifier` last.
 7. Routes any failure back to `technical-artist`, never to `verifier`.
 
-Agents drive the same CLI documented below; every command prints JSON, so `concept-art jobs <game>`
-and `concept-art show <game> <job-id>` are the read-back points. See `CLAUDE.md` for the full rule
+Agents drive the same CLI documented below; every command prints JSON, so
+`concept-art jobs <art-model>` and `concept-art show <art-model> <job-id>` are the read-back points. See `CLAUDE.md` for the full rule
 set the orchestrator follows.
 
 ### 2. From the UI
@@ -317,85 +334,84 @@ concept-art-ui
 # http://127.0.0.1:8000
 ```
 
-The dashboard at `/` has the reference form, the draft form, and a table of every game's jobs.
+The front end is a Gradio app adapted from the Qwen Image LoRA Studio, so it looks and behaves like
+the tool the LoRAs were trained in. Three tabs:
 
-- **Adding references** takes images, optional `.txt` caption files, an optional shared description,
-  and a choice of what to do with anything left uncaptioned (describe with GPT, or leave blank).
-- **The reference library** at `/references/<game>` lists every reference with a thumbnail and an
-  editable description, plus a `.txt` upload that fills them by filename.
-- **The draft form** has a **Backend** dropdown (GPT Image 2 or Hugging Face Space) and a **LoRA**
-  dropdown containing only the three catalogued LoRAs. Choosing one fills the prompt box with that
-  LoRA's example prompt, so you can edit rather than start blank; anything you type yourself is
-  never overwritten. The HF-only fields (negative prompt, seed, steps, guidance `4.0`, LoRA scale
-  `1.25`, background model `birefnet-general`) are ignored by GPT Image 2. **Transparency** is
-  `Transparent PNG` by default; choose `Opaque` only for artwork that genuinely requires a
-  background.
-- **The job page** at `/jobs/<game>/<job-id>` shows the draft over a checkerboard so transparency is
-  visible, with **Approve**, **Request changes**, and — once approved — **Export 2K final**. The
-  final appears on the same page.
+- **References** is the studio's Train gallery, repurposed. Pick the art model, then *Add reference
+  images* — which stores them immediately and contacts nothing. Every reference appears as a
+  thumbnail with its own caption box underneath, paged eight at a time. Caption them with *Add
+  caption .txt files*, by typing and pressing *Save captions on this page*, or with *Describe blank
+  ones with GPT*, which fills only the empty ones and shows a progress bar while it runs. The status
+  line tells you how many are still uncaptioned.
+- **Generate** is the studio's Generate panel plus the approval gate. Pick the art model — which
+  picks its LoRA — choose the backend, and the prompt box preloads that model's own example so you
+  edit rather than start blank (anything you type yourself is never overwritten). Hugging Face
+  sampler settings live in a collapsed accordion. **Create 1024px draft** renders over a
+  checkerboard so transparency is visible, and prints the exact prompt sent to the provider.
+  **Approve draft** / **Request changes** are enabled only for a `draft_ready` job, and
+  **Export 2K final** stays disabled until that draft is approved.
+- **Jobs** lists every job for the selected art model with its state, backend and prompt.
 
-The same routes stay available as a JSON API, so scripts and agents can use the server too. They
-return JSON to a non-browser client and redirect a browser to the relevant page:
+The JSON API is mounted on the same server, so scripts and agents can drive it too:
 
 ```bash
-# The draft response includes the job ID.
-curl -X POST http://127.0.0.1:8000/jobs/battle-cars/<job-id>/approve
-curl -X POST http://127.0.0.1:8000/jobs/battle-cars/<job-id>/final
-curl -X POST "http://127.0.0.1:8000/jobs/battle-cars/<job-id>/reject?feedback=Wider%20silhouette"
+curl http://127.0.0.1:8000/api/models
+curl -X POST http://127.0.0.1:8000/api/models/drone-bc/jobs/<job-id>/approve
+curl -X POST http://127.0.0.1:8000/api/models/drone-bc/jobs/<job-id>/final
+curl -X POST "http://127.0.0.1:8000/api/models/drone-bc/jobs/<job-id>/reject?feedback=Wider%20silhouette"
 ```
 
-Generated files are served at `/assets/<game>/drafts/<job-id>` and `/assets/<game>/finals/<job-id>`;
-reference images at `/references/<game>/image/<filename>`.
+Generated files are served at `/assets/<art-model>/drafts/<job-id>` and
+`/assets/<art-model>/finals/<job-id>`.
 
 ### 3. From the command line
 
 ```bash
 # A description argument, or a sibling drone.txt, or GPT writes one.
-concept-art add-reference battle-cars path\to\drone.png "Egg-shaped white drone shell, lime thruster rings"
-concept-art add-reference battle-cars path\to\pilot.png
+concept-art add-reference drone-bc path	o\drone.png "Egg-shaped white drone shell, lime thruster rings"
+concept-art add-reference pilot-bc path	o\pilot.png
 
-# Hugging Face: one of the three LoRAs, matched to its own game.
-concept-art draft battle-cars "A drone with a smooth white and grey egg-shaped shell, lime green thruster rings on each side, a glowing orange vent slot on its face, two upright yellow-tipped blade fins above and one below, stylized 3D rendered game asset, glossy cel-shaded surfaces, plain white background" --backend huggingface --lora-name jjmcarrascosa/drone-bc
+# Hugging Face: the art model determines the LoRA, so no slug is ever typed.
+concept-art draft drone-bc "A drone with a smooth white and grey egg-shaped shell, lime green thruster rings on each side, a glowing orange vent slot on its face, two upright yellow-tipped blade fins above and one below, stylized 3D rendered game asset, glossy cel-shaded surfaces, plain white background" --backend huggingface
 
-concept-art draft battle-cars "A pilot in a horned imp mask and hood, wearing a green graffiti-covered hooded jacket and dark cargo trousers, holding a curved black blade, in colourful high-top sneakers, full body, flat vector game art, plain white background" --backend huggingface --lora-name jjmcarrascosa/pilot-bc --seed 42 --steps 28 --guidance-scale 4.0 --lora-scale 1.25
+concept-art draft pilot-bc "A pilot in a horned imp mask and hood, wearing a green graffiti-covered hooded jacket and dark cargo trousers, holding a curved black blade, in colourful high-top sneakers, full body, flat vector game art, plain white background" --backend huggingface --seed 42 --steps 28 --guidance-scale 4.0 --lora-scale 1.25
 
-concept-art draft massive-warfare "A pilot undead soldier with a blazing skull head wreathed in orange fire, heavy charcoal combat armour lined with glowing orange lights, a rifle held at his hip, semi-realistic painted digital game art, soft rim lighting, plain white background" --backend huggingface --lora-name jjmcarrascosa/pilot-mw
+concept-art draft pilot-mw "A pilot undead soldier with a blazing skull head wreathed in orange fire, heavy charcoal combat armour lined with glowing orange lights, a rifle held at his hip, semi-realistic painted digital game art, soft rim lighting, plain white background" --backend huggingface
 
-# GPT Image 2 needs no LoRA; it uses this game's references.
-concept-art draft battle-cars "A drone with a smooth white and grey egg-shaped shell, lime green thruster rings on each side, stylized 3D rendered game asset, glossy cel-shaded surfaces, plain white background" --backend gpt-image-2
+# GPT Image 2 needs no LoRA; it uses this art model's references.
+concept-art draft drone-bc "A drone with a smooth white and grey egg-shaped shell, lime green thruster rings on each side, stylized 3D rendered game asset, glossy cel-shaded surfaces, plain white background" --backend gpt-image-2
 
-concept-art approve battle-cars <job-id>
-concept-art final battle-cars <job-id>
+concept-art approve drone-bc <job-id>
+concept-art final drone-bc <job-id>
 
 # Keep artist feedback with a rejected draft; no final can be made from it.
-concept-art reject battle-cars <job-id> --feedback "Wider silhouette; reduce surface noise"
+concept-art reject drone-bc <job-id> --feedback "Wider silhouette; reduce surface noise"
 
 # Read-back
-concept-art loras
-concept-art games
-concept-art jobs battle-cars --state draft_ready
-concept-art show battle-cars <job-id>
+concept-art models
+concept-art jobs drone-bc --state draft_ready
+concept-art show drone-bc <job-id>
 ```
 
 Every command prints the job (or list) as JSON on stdout. `concept-art --help` reprints the runnable
-example above for each LoRA. `--data-dir` relocates the workspace root, which defaults to `data`.
+example above for each art model. `--data-dir` relocates the workspace root, which defaults to `data`.
 `--references N` caps how many references a draft may use (1–16), and `--opaque` disables the
 transparent-PNG default.
 
-Drafts use all available references up to 16. When there are more, GPT receives only their stored text descriptions and chooses the 16 best matches; the exact filenames, descriptions, and hashes are persisted so the final reuses the same set.
+Drafts use all of the art model's references up to 16. When there are more, GPT receives only their stored text descriptions and chooses the 16 best matches; the exact filenames, descriptions, and hashes are persisted so the final reuses the same set.
 
 ## Choosing a generation backend
 
 | Backend | Use it when | Pros | Trade-offs |
 |---|---|---|---|
-| **GPT Image 2** | You have game references and need strong visual adherence without training first. | Sends up to 16 selected, game-local reference images to the edit endpoint; GPT description matching narrows larger pools; fast to start; requests transparent output. | Paid per generation; references leave the local machine for the provider; needs `OPENAI_API_KEY`; style consistency depends on reference selection and prompt quality. |
-| **Hugging Face Space + named LoRA** | The game's visual style already has one of the three trained private Qwen Image LoRAs. | Does not transmit the game reference images for inference; reusable style adapter; the LoRA-to-game binding makes style selection explicit and auditable; supports Swin2SR 2K finals and server-side background removal. | Requires an available GPU Space and private-token access; first inference or upscaling can be slow; segmentation can trim delicate details, so quality must be reviewed. |
+| **GPT Image 2** | The art model has references and you need visual adherence without training first. | Sends up to 16 selected references belonging to that art model to the edit endpoint; GPT description matching narrows larger pools; fast to start; requests transparent output. | Paid per generation; references leave the local machine for the provider; needs `OPENAI_API_KEY`; style consistency depends on reference selection and prompt quality. |
+| **Hugging Face Space + the model's LoRA** | The art model's style is already trained into one of the three private Qwen Image LoRAs. | Does not transmit the reference images for inference; reusable style adapter; the model-to-LoRA binding makes style selection explicit and auditable; supports Swin2SR 2K finals and server-side background removal. | Requires an available GPU Space and private-token access; first inference or upscaling can be slow; segmentation can trim delicate details, so quality must be reviewed. |
 
 Both routes create a 1024×1024 draft first and require explicit approval before a final. GPT Image 2 uses `quality="low"`. HF/LoRA uses the configured prompt, negative prompt, LoRA, steps, guidance, LoRA scale, seed, scheduler, and base model; those exact values are persisted for the approved final. Both routes reject opaque PNGs rather than silently exporting non-transparent assets.
 
 ### Reliability and 2K final policy
 
-When Hugging Face is selected, it is always tried first. A timeout, forbidden response, malformed response, or other provider error automatically retries through GPT Image 2 using only the selected, game-local references; the job audit notes record the fallback. If GPT Image 2 is unavailable or the game has no references, the job fails safely instead of using another game's style.
+When Hugging Face is selected, it is always tried first. A timeout, forbidden response, malformed response, or other provider error automatically retries through GPT Image 2 using only that art model's own references; the job audit notes record the fallback. If GPT Image 2 is unavailable or the model has no references, the job fails safely instead of borrowing another model's style.
 
 Final exports are **2048×2048** and preserve their PNG alpha channel. For an HF final, the Space repeats the same deterministic 1024×1024 generation and applies tiled Swin2SR x2. The only stage-specific HF inference switch is `upscale_to_2k`: `false` for the draft and `true` after approval. `remove_background` remains identical between stages and follows the optional Transparent PNG selection. GPT Image 2 uses the approved draft as its primary edit input plus up to 15 selected style references, then generates the high-quality 2K final.
 
@@ -413,7 +429,7 @@ The equivalent Space request options are:
 }
 ```
 
-`remove_background` controls PNG transparency independently from 2K upscaling, so either option can be enabled without the other. `background_model` names the Space's segmentation model and is always sent explicitly, so a change of server-side default cannot silently alter a game's cutouts; it defaults to `birefnet-general` and the Space rejects an unknown name with a 400. Guidance defaults to `4.0` and LoRA scale to `1.25`, matching the studio's own defaults.
+`remove_background` controls PNG transparency independently from 2K upscaling, so either option can be enabled without the other. `background_model` names the Space's segmentation model and is always sent explicitly, so a change of server-side default cannot silently alter an art model's cutouts; it defaults to `birefnet-general` and the Space rejects an unknown name with a 400. Guidance defaults to `4.0` and LoRA scale to `1.25`, matching the studio's own defaults.
 
 ### Hugging Face replay API protocol
 
@@ -421,9 +437,9 @@ The client sends every inference control to `POST <HF_SPACE_URL>/v1/generate`, i
 
 ## Provenance sidecars and feedback
 
-Every generated PNG receives a sibling sidecar using the studio-friendly convention `image.png.prompt`. It contains the effective model/backend, complete generation prompt, LoRA name where applicable, game-local reference hashes, request ID, dimensions, transparency selection, job state, and every approval/rejection comment.
+Every generated PNG receives a sibling sidecar using the studio-friendly convention `image.png.prompt`. It contains the effective model/backend, complete generation prompt, LoRA name where applicable, the art model's reference hashes, request ID, dimensions, transparency selection, job state, and every approval/rejection comment.
 
-The canonical job record remains in `data/games/<game>/jobs/<job-id>.json`; sidecars are refreshed when a draft is approved or rejected, so moving a generated asset does not lose its prompt or artist feedback.
+The canonical job record remains in `data/models/<art-model>/jobs/<job-id>.json`; sidecars are refreshed when a draft is approved or rejected, so moving a generated asset does not lose its prompt or artist feedback.
 
 ## Project files
 
@@ -444,43 +460,45 @@ The canonical job record remains in `data/games/<game>/jobs/<job-id>.json`; side
 |---|---|
 | `__init__.py` | Loads an optional `.env` on import, then exposes `ConceptArtWorkflow`. |
 | `config.py` | `load_settings()`: optionally reads a `.env` from the working directory with `override=False`, so system environment variables always win. |
-| `models.py` | Dataclasses and enums: `ArtRequest`, `ArtJob`, `Backend`, `JobState`, `DEFAULT_BACKGROUND_MODEL`, plus job JSON load/save. |
-| `loras.py` | The closed catalogue of the three trained LoRAs — trigger word, game, subject keyword, style keywords, example prompt — and `resolve_lora()`, which refuses an unknown slug or a cross-game pairing. |
+| `models.py` | Dataclasses and enums: `ArtRequest`, `ArtJob`, `Backend`, `JobState`, `DEFAULT_BACKGROUND_MODEL`, plus job JSON load/save. Not the art-model catalogue — that is `art_models.py`. |
+| `art_models.py` | The closed catalogue of the three art models — trigger word, LoRA slug, subject keyword, style keywords, example prompt — and `resolve_model()`, which refuses anything else. |
 | `prompts.py` | `build_prompt()` — the one place a prompt is built, dispatching on backend: the trained LoRA caption shape for Hugging Face, reference-extracted style for GPT Image 2. |
-| `workspace.py` | `GameWorkspace` — the isolation boundary. Validates the game slug, owns every path under `data/games/<game>/`, stores reference descriptions, and computes reference hashes. |
+| `workspace.py` | `ModelWorkspace` — the isolation boundary. Refuses an uncatalogued art model, owns every path under `data/models/<art-model>/`, stores reference descriptions, and computes reference hashes. |
 | `references.py` | `OpenAIReferenceAgent` (GPT-written descriptions and text-only 16-of-N ranking) and the `.txt` caption helpers that implement the studio's `drone.txt → drone.png` convention. |
 | `agents.py` | `QualityGate` — rejects an opaque PNG before export. |
 | `providers.py` | `RenderSpec` / `RenderedImage`, `HuggingFaceSpaceProvider` (`POST /v1/generate`), `GPTImage2Provider` (images-edit endpoint), and `DeterministicProvider` for offline tests. |
 | `workflow.py` | `ConceptArtWorkflow` — the shared core behind all three entry points: reference and caption handling, LoRA validation, draft, approve/reject, final with parameter replay, HF→GPT fallback, sidecars, and the usage ledger. |
-| `cli.py` | The `concept-art` command: `add-reference`, `draft`, `approve`, `reject`, `final`, `show`, `games`, `loras`, `jobs`. |
-| `web.py` | The `concept-art-ui` FastAPI app: dashboard, reference library and caption editor, job pages with approve/reject/final controls, asset serving, and the JSON API for scripts and agents. |
+| `cli.py` | The `concept-art` command: `add-reference`, `draft`, `approve`, `reject`, `final`, `show`, `models`, `jobs`. Every art-model argument is restricted to the three. |
+| `web.py` | The JSON HTTP API under `/api/`, plus `/assets/` image serving. No markup: the human front end is Gradio, which `main()` mounts onto this same app. |
+| `ui.py` | The Gradio front end adapted from the Qwen Image LoRA Studio: the References gallery with per-image captions and on-request GPT captioning, the Generate panel, and `approval_gate()`, which keeps the 2K final locked until a human approves. |
 
 ### Agent definitions — `.claude/agents/`
 
 | File | Role |
 |---|---|
-| `style-director.md` | Read-only art-direction planner, scoped to exactly one game. |
-| `technical-artist.md` | Runs the CLI workflow for one game; carries the three LoRAs and the prompt-style exemplars, and stops after the draft for human approval. |
+| `style-director.md` | Read-only art-direction planner, scoped to exactly one art model. |
+| `technical-artist.md` | Runs the CLI workflow for one art model; carries the three models and the prompt-style exemplars, and stops after the draft for human approval. |
 | `verifier.md` | Read-only final check: job state, reference-hash isolation, alpha channel, usage ledger. |
 
 ### Tests — `tests/`
 
 | File | Covers |
 |---|---|
-| `test_workflow.py` | Approval gate, rejection feedback, game isolation, opaque rejection, 16-of-N reference selection, HF parameter replay, GPT final input composition, HF→GPT fallback. |
+| `test_workflow.py` | Approval gate, rejection feedback, art-model isolation, opaque rejection, 16-of-N reference selection, HF parameter replay, GPT final input composition, HF→GPT fallback. |
 | `test_providers.py` | HF request mapping and replay-parameter validation; GPT Image 2 reference limit and supported draft size. |
-| `test_loras.py` | The catalogue is exactly three; an invented slug and a cross-game pairing are both refused, at the helper and through `create_draft`. |
+| `test_art_models.py` | The catalogue is exactly three; `drone-mw` and any other invented name are refused at the resolver, the workspace and `create_draft`; each model's LoRA and reference folder are its own. |
 | `test_prompts.py` | Both prompt shapes: trigger prepended once, style keywords appended when missing, no wrapper text on the LoRA prompt, reference style notes in the GPT prompt, identical draft/final HF prompt, and a rebuilt prompt on the GPT fallback. |
-| `test_captions.py` | Sibling `.txt` captions, caption priority, stem matching, the UI upload/caption-editor routes, and reference-image path traversal. |
-| `test_web.py` | The browser flow end to end for both backends, the reference-upload form, the transparency control, and the JSON API used by curl and agents. |
+| `test_captions.py` | Sibling `.txt` captions, caption priority, stem matching, the API upload/caption routes, that uploaded `.txt` captions are never overridden, and that re-adding a reference keeps its caption and spends no GPT call. |
+| `test_web.py` | The JSON API end to end for both backends: draft → approve → final, the blocked final before approval, per-model job listing, and that markup stays out of `web.py`. |
+| `test_ui.py` | The Gradio app builds, adding references contacts no provider, captioning touches only blank entries, and `approval_gate()` keeps the 2K final locked for every state except `approved`. |
 
 ### Generated at runtime — `data/` (gitignored)
 
 ```text
 data/
 ├─ usage.jsonl                       # append-only local cost ledger
-└─ games/<game>/
-   ├─ references/                    # this game's reference images only
+└─ models/<art-model>/               # drone-bc, pilot-bc or pilot-mw
+   ├─ references/                    # this art model's reference images only
    │  └─ descriptions.json           # filename → stored description
    ├─ jobs/<job-id>.json             # canonical job record
    ├─ drafts/<job-id>.png            # 1024×1024 draft (+ .png.prompt sidecar)

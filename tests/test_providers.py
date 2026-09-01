@@ -145,3 +145,30 @@ def test_gpt_image_2_uses_and_retains_supported_low_quality_draft_size(
     assert captured["size"] == "1024x1024"
     assert captured["quality"] == "low"
     assert Image.open(BytesIO(result.png)).size == (1024, 1024)
+
+
+def test_gpt_image_2_never_sends_the_dalle_only_response_format(monkeypatch, tmp_path):
+    """gpt-image models reject `response_format` with a 400 and always return base64."""
+    reference = tmp_path / "reference.png"
+    Image.new("RGBA", (16, 16), (255, 0, 0, 255)).save(reference)
+    generated = tmp_path / "generated.png"
+    Image.new("RGBA", (1024, 1024), (1, 2, 3, 0)).save(generated)
+    captured = {}
+
+    class FakeImages:
+        def edit(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                data=[SimpleNamespace(b64_json=base64.b64encode(generated.read_bytes()).decode())],
+                _request_id="image-request",
+            )
+
+    monkeypatch.setattr("openai.OpenAI", lambda: SimpleNamespace(images=FakeImages()))
+    result = GPTImage2Provider().render(RenderSpec("vehicle", [reference], 2048, 2048, True))
+
+    assert "response_format" not in captured
+    assert captured["model"] == "gpt-image-2"
+    assert captured["background"] == "transparent"
+    assert captured["size"] == "2048x2048"
+    assert captured["quality"] == "high"
+    assert result.png, "base64 is still returned without asking for it"

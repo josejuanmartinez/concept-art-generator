@@ -120,7 +120,9 @@ class GPTImage2Provider(ArtProvider):
         # GPT Image 2 cannot render a 512x512 output. Keep the workflow's draft
         # intent, but request and retain the model's supported 1024px square draft.
         request_size = "1024x1024" if is_draft else f"{spec.width}x{spec.height}"
-        # The edits endpoint accepts image inputs; only this game's bounded reference list is sent.
+        # The edits endpoint accepts image inputs; only this model's bounded reference list is sent.
+        # `response_format` is a DALL·E parameter: the SDK still accepts it, but gpt-image models
+        # reject it with a 400 and always return base64, so it must not be sent.
         with ExitStack() as stack:
             handles = [stack.enter_context(open(path, "rb")) for path in spec.references]
             response = client.images.edit(
@@ -130,7 +132,6 @@ class GPTImage2Provider(ArtProvider):
                 size=request_size,
                 quality="low" if is_draft else "high",
                 background="transparent" if spec.transparent else "auto",
-                response_format="b64_json",
             )
         image_b64 = response.data[0].b64_json
         if not image_b64:
