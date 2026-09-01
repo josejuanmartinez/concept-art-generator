@@ -1,16 +1,18 @@
 """The one place a generation prompt is built.
 
 The two backends need genuinely different prompts, so `build_prompt` dispatches on the backend
-rather than wrapping one shape for both:
+rather than wrapping one shape for both. What they share is the leading trigger word: every prompt
+starts `<art model> <subject>`, so a prompt reads the same whichever backend it went to.
 
 * **Hugging Face + LoRA** — the LoRA was trained on captions of one exact shape, so the prompt is
   restricted to that shape and nothing else is added: `<trigger> <subject>, <style keywords>`,
   ending in `plain white background`. The Space strips that background itself via
   `remove_background`, so no "transparent background" instruction is appended; asking a LoRA for
   something its captions never said only pushes it off-distribution.
-* **GPT Image 2** — no trigger word exists. The style comes from this model's own references: the
-  images are attached to the edit request, and the descriptions extracted from them are restated
-  here as style notes so the requirement is explicit rather than implied.
+* **GPT Image 2** — the trigger carries no trained meaning here, so it rides along as a label on the
+  subject line and the style still comes from this model's own references: the images are attached
+  to the edit request, and the descriptions extracted from them are restated here as style notes so
+  the requirement is explicit rather than implied.
 """
 
 from __future__ import annotations
@@ -27,30 +29,37 @@ def build_prompt(
     """Build the prompt for `backend`, defaulting to the one the request asked for.
 
     `backend` is passed explicitly when a Hugging Face request falls back to GPT Image 2, so the
-    fallback gets a reference-driven prompt instead of a meaningless trigger word.
+    fallback gets a reference-driven prompt instead of only a trigger word.
     """
     effective = backend or Backend(request.backend)
+    model = resolve_model(request.art_model)
     if effective == Backend.HUGGING_FACE:
-        return lora_prompt(resolve_model(request.art_model), request.prompt)
+        return lora_prompt(model, request.prompt)
     return reference_prompt(request, descriptions or {})
 
 
-def lora_prompt(model: ArtModel, subject: str) -> str:
-    """`<trigger> <subject>, <style keywords>` — the shape the LoRA was trained on.
+def with_trigger(model: ArtModel, subject: str) -> str:
+    """`<trigger> <subject>`, with the trigger separated by a space and never repeated.
 
-    The trigger is separated by a space, exactly as the training captions were written.
+    A subject the human already prefixed by hand is normalised rather than doubled up.
     """
     text = subject.strip().rstrip(".").strip()
     if text.lower().startswith(model.trigger.lower()):
         text = text[len(model.trigger) :].lstrip(" ,").strip()
+    return f"{model.trigger} {text}" if text else model.trigger
+
+
+def lora_prompt(model: ArtModel, subject: str) -> str:
+    """`<trigger> <subject>, <style keywords>` — the shape the LoRA was trained on."""
+    text = with_trigger(model, subject)
     if not text.lower().endswith(model.style_suffix.lower()):
-        text = f"{text}, {model.style_suffix}" if text else model.style_suffix
-    return f"{model.trigger} {text}"
+        text = f"{text}, {model.style_suffix}"
+    return text
 
 
 def reference_prompt(request: ArtRequest, descriptions: dict[str, str]) -> str:
-    """Style extracted from this model's own references, for a backend with no trigger word."""
-    subject = request.prompt.strip().rstrip(".").strip()
+    """Style extracted from this model's own references, for a backend with no trained trigger."""
+    subject = with_trigger(resolve_model(request.art_model), request.prompt)
     notes = [text.strip() for text in descriptions.values() if text.strip()]
     extracted = (
         "Style extracted from those references:\n"
@@ -65,8 +74,8 @@ def reference_prompt(request: ArtRequest, descriptions: dict[str, str]) -> str:
         else ""
     )
     background = "transparent background" if request.transparent else "plain, uncluttered background"
-    # The art model's name is a repo slug, meaningless to GPT Image 2 — the style has to come
-    # from the references themselves, so the name is deliberately left out.
+    # The leading art model name is a repo slug with no trained meaning for GPT Image 2 — it keeps
+    # both backends' prompts readable side by side, but the style still comes from the references.
     return (
         f"Concept art. Subject: {subject}. "
         f"Match only the visual language of the attached reference images: "

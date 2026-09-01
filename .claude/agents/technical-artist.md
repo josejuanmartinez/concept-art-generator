@@ -63,9 +63,11 @@ So a new `drone-bc` subject keeps the same opening and closing shape:
 > single recessed sensor eye, folded landing struts beneath, stylized 3D rendered game asset,
 > glossy cel-shaded surfaces, plain white background
 
-For **GPT Image 2** there is no trigger word and no LoRA: the prompt is built from the style
-extracted from this art model's own reference descriptions, and the references are attached to the
-request. Write a plain subject line and let the references carry the style.
+For **GPT Image 2** there is no LoRA: the prompt is built from the style extracted from this art
+model's own reference descriptions, and the references are attached to the request. Write a plain
+subject line and let the references carry the style. The trigger word is prepended here too, so both
+backends' prompts open the same way (`drone-bc A drone ...`) — it is only a label to GPT Image 2, not
+a trained token, so do not type it and do not lean on it for style.
 
 ## Loop
 

@@ -139,7 +139,10 @@ class ConceptArtWorkflow:
         model = resolve_model(request.art_model)
         ws = self.workspace(request.art_model)
         references, descriptions = self._select_references(
-            ws, request.prompt, request.reference_count
+            ws,
+            request.prompt,
+            request.reference_count,
+            required=request.backend != Backend.HUGGING_FACE,
         )
         prompt = build_prompt(request, descriptions)
         job = ArtJob(
@@ -157,7 +160,7 @@ class ConceptArtWorkflow:
         if request.backend == Backend.HUGGING_FACE and seed is None:
             seed = secrets.randbelow(2**31 - 1)
         draft_size = 1024 if request.backend == Backend.HUGGING_FACE else 512
-        rendered, effective_backend = self._render(
+        rendered, effective_backend, sent_prompt = self._render(
             request.backend,
             RenderSpec(
                 prompt,
@@ -186,7 +189,7 @@ class ConceptArtWorkflow:
         job.cost_usd += rendered.estimated_cost_usd
         job.generation_parameters = rendered.generation_parameters or {}
         job.artifacts["draft"] = self._artifact(
-            prompt, effective_backend, rendered.provider_request_id, destination
+            sent_prompt, effective_backend, rendered.provider_request_id, destination
         )
         job.notes.append(
             f"Effective backend: {effective_backend}; provider request: "
@@ -245,8 +248,7 @@ class ConceptArtWorkflow:
             art_model,
             job.prompt,
             draft_backend,
-            job.lora_name,
-            len(references),
+            reference_count=max(1, len(references)),
             transparent=job.transparent,
             negative_prompt=str(parameters.get("negative_prompt", "")),
             seed=parameters.get("seed"),
@@ -270,7 +272,7 @@ class ConceptArtWorkflow:
             if not approved_draft.exists():
                 raise ValueError("The approved draft is missing; GPT final consistency is unsafe.")
             render_references = [approved_draft, *references[:15]]
-        rendered, effective_backend = self._render(
+        rendered, effective_backend, sent_prompt = self._render(
             request.backend,
             RenderSpec(
                 prompt,
@@ -310,7 +312,7 @@ class ConceptArtWorkflow:
                 )
             }
             original = {key: parameters.get(key) for key in replayed}
-            if request.backend == Backend.HUGGING_FACE and replayed != original:
+            if effective_backend == Backend.HUGGING_FACE and replayed != original:
                 raise RuntimeError("Hugging Face final did not replay the approved draft parameters.")
         destination = ws.image_path("finals", job.id)
         image = Image.open(BytesIO(rendered.png)).convert("RGBA")
@@ -325,7 +327,7 @@ class ConceptArtWorkflow:
         job.final_path, job.state = str(destination), JobState.FINAL_READY
         job.cost_usd += rendered.estimated_cost_usd
         job.artifacts["final"] = self._artifact(
-            prompt, effective_backend, rendered.provider_request_id, destination
+            sent_prompt, effective_backend, rendered.provider_request_id, destination
         )
         job.notes.append(
             f"Final effective backend: {effective_backend}; exported {image.width}x{image.height} PNG."
@@ -336,10 +338,18 @@ class ConceptArtWorkflow:
         return job
 
     def _select_references(
-        self, ws: ModelWorkspace, prompt: str, limit: int
+        self, ws: ModelWorkspace, prompt: str, limit: int, required: bool = True
     ) -> tuple[list[Path], dict[str, str]]:
+        """Pick this model's references, captioning and ranking them if needed.
+
+        `required` is False for Hugging Face: only `GPTImage2Provider` reads `spec.references`,
+        so a LoRA draft needs none. They are still gathered when present, because the GPT
+        fallback attaches them if the Space fails.
+        """
         candidates = ws.reference_files()
         if not candidates:
+            if not required:
+                return [], {}
             raise ValueError(f"{ws.art_model} has no references. Add them before generating.")
         metadata = ws.reference_descriptions()
         for path in candidates:
@@ -394,14 +404,16 @@ class ConceptArtWorkflow:
         spec: RenderSpec,
         job: ArtJob,
         rebuild_prompt: Callable[[Backend], str] | None = None,
-    ) -> tuple[RenderedImage, Backend]:
+    ) -> tuple[RenderedImage, Backend, str]:
         """Use HF first; retry with the model's own GPT Image 2 references when it fails.
 
         The fallback rebuilds the prompt for GPT Image 2: the LoRA trigger word means nothing
-        to it, and it needs the reference-derived style instead.
+        to it, and it needs the reference-derived style instead. That rebuilt prompt is returned
+        alongside the backend, because it — not the one we set out to send — is what the job
+        record has to name.
         """
         try:
-            return self.providers[requested].render(spec), requested
+            return self.providers[requested].render(spec), requested, spec.prompt
         except Exception as error:
             if requested != Backend.HUGGING_FACE or Backend.GPT_IMAGE_2 not in self.providers:
                 raise
@@ -409,10 +421,9 @@ class ConceptArtWorkflow:
                 raise RuntimeError(
                     "HF failed and no references are available for this art model's GPT fallback."
                 ) from error
+            fallback_prompt = rebuild_prompt(Backend.GPT_IMAGE_2) if rebuild_prompt else spec.prompt
             fallback_spec = RenderSpec(
-                prompt=(
-                    rebuild_prompt(Backend.GPT_IMAGE_2) if rebuild_prompt else spec.prompt
-                ),
+                prompt=fallback_prompt,
                 references=spec.references,
                 width=spec.width,
                 height=spec.height,
@@ -430,7 +441,11 @@ class ConceptArtWorkflow:
             job.notes.append(
                 f"Hugging Face failed ({type(error).__name__}); retried with GPT Image 2."
             )
-            return self.providers[Backend.GPT_IMAGE_2].render(fallback_spec), Backend.GPT_IMAGE_2
+            return (
+                self.providers[Backend.GPT_IMAGE_2].render(fallback_spec),
+                Backend.GPT_IMAGE_2,
+                fallback_prompt,
+            )
 
     def _ledger(self, job: ArtJob, stage: str) -> None:
         record = {

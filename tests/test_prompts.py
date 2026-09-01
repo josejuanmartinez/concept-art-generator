@@ -42,11 +42,17 @@ def test_lora_prompt_adds_nothing_else():
 def test_gpt_prompt_restates_the_style_extracted_from_the_references():
     request = ArtRequest("drone-bc", "An armored street racer.", Backend.GPT_IMAGE_2)
     built = build_prompt(request, {"a.png": "Lime thruster rings", "b.png": "Glossy cel-shaded"})
-    assert "Subject: An armored street racer." in built
+    assert "Subject: drone-bc An armored street racer." in built
     assert "- Lime thruster rings" in built
     assert "- Glossy cel-shaded" in built
     assert "transparent background" in built
-    assert "drone-bc" not in built
+
+
+def test_gpt_prompt_carries_the_trigger_prefix_without_repeating_it():
+    request = ArtRequest("drone-bc", "drone-bc, An armored racer", Backend.GPT_IMAGE_2)
+    built = build_prompt(request, {})
+    assert "Subject: drone-bc An armored racer." in built
+    assert built.count("drone-bc") == 1
 
 
 def test_gpt_prompt_honours_an_opaque_request():
@@ -56,8 +62,8 @@ def test_gpt_prompt_honours_an_opaque_request():
 
 def test_backend_override_builds_the_gpt_prompt_for_a_hugging_face_request():
     built = build_prompt(hf_request("A drone"), {"a.png": "Lime rings"}, Backend.GPT_IMAGE_2)
-    assert built.startswith("Concept art. Subject:")
-    assert "drone-bc" not in built
+    assert built.startswith("Concept art. Subject: drone-bc A drone.")
+    assert "- Lime rings" in built
 
 
 def test_build_prompt_refuses_an_uncatalogued_art_model():
@@ -123,7 +129,7 @@ def test_hugging_face_draft_and_final_send_the_identical_lora_prompt(tmp_path: P
     assert final.prompt == draft.prompt
 
 
-def test_gpt_fallback_rebuilds_the_prompt_without_the_trigger_word(tmp_path: Path):
+def test_gpt_fallback_rebuilds_the_prompt_in_the_reference_shape(tmp_path: Path):
     class Failing(DeterministicProvider):
         backend = Backend.HUGGING_FACE
 
@@ -134,6 +140,6 @@ def test_gpt_fallback_rebuilds_the_prompt_without_the_trigger_word(tmp_path: Pat
     flow.create_draft(hf_request(DRONE.example_prompt))
 
     sent = gpt.specs[0].prompt
-    assert "drone-bc" not in sent
-    assert sent.startswith("Concept art. Subject:")
+    assert sent.startswith("Concept art. Subject: drone-bc A drone")
+    assert sent.count("drone-bc") == 1
     assert "- White egg-shaped drone shell, lime thruster rings" in sent

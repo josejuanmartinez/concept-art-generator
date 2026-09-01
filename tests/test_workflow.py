@@ -240,3 +240,157 @@ def test_gpt_final_uses_approved_draft_plus_at_most_15_style_references(tmp_path
     assert len(final.references) == 16
     assert final.references[0] == Path(job.draft_path)
     assert [path.name for path in final.references[1:]] == job.reference_files[:15]
+
+
+class ReplayableHF(DeterministicProvider):
+    """A Space stand-in that records its specs and returns replayable parameters."""
+
+    backend = Backend.HUGGING_FACE
+
+    def __init__(self):
+        self.specs = []
+
+    def render(self, spec: RenderSpec):
+        self.specs.append(spec)
+        rendered = super().render(spec)
+        return RenderedImage(
+            rendered.png,
+            rendered.estimated_cost_usd,
+            rendered.provider_request_id,
+            {
+                "prompt": spec.prompt,
+                "lora_name": spec.lora_name,
+                "negative_prompt": spec.negative_prompt,
+                "steps": spec.steps,
+                "guidance_scale": spec.guidance_scale,
+                "lora_scale": spec.lora_scale,
+                "seed": spec.seed,
+                "scheduler": "FlowMatchEulerDiscreteScheduler",
+                "base_model": "Qwen/Qwen-Image-2512",
+                "background_model": spec.background_model,
+            },
+        )
+
+
+class CapturingGPT(DeterministicProvider):
+    backend = Backend.GPT_IMAGE_2
+
+    def __init__(self):
+        self.specs = []
+
+    def render(self, spec: RenderSpec):
+        self.specs.append(spec)
+        return super().render(spec)
+
+
+def test_a_hugging_face_draft_needs_no_references(tmp_path: Path):
+    """Only `GPTImage2Provider` reads `spec.references`; a LoRA draft must not demand them."""
+    hf = ReplayableHF()
+    flow = ConceptArtWorkflow(tmp_path, {Backend.HUGGING_FACE: hf})
+
+    job = flow.create_draft(ArtRequest("drone-bc", "A drone with a squat hull", Backend.HUGGING_FACE))
+
+    assert job.state == JobState.DRAFT_READY
+    assert job.reference_files == []
+    assert job.lora_name == "jjmcarrascosa/drone-bc"
+    assert hf.specs[0].references == []
+
+
+def test_a_hugging_face_final_needs_no_references(tmp_path: Path):
+    hf = ReplayableHF()
+    flow = ConceptArtWorkflow(tmp_path, {Backend.HUGGING_FACE: hf})
+    job = flow.create_draft(ArtRequest("drone-bc", "A drone", Backend.HUGGING_FACE))
+    flow.approve("drone-bc", job.id)
+
+    final = flow.create_final("drone-bc", job.id)
+
+    assert final.state == JobState.FINAL_READY
+    assert Image.open(final.final_path).size == (2048, 2048)
+
+
+def test_gpt_image_2_still_refuses_to_draft_without_references(tmp_path: Path):
+    flow = workflow(tmp_path)
+    with pytest.raises(ValueError, match="has no references"):
+        flow.create_draft(ArtRequest("drone-bc", "A drone", Backend.GPT_IMAGE_2))
+
+
+def test_a_final_falling_back_to_gpt_invents_no_logo_instruction(tmp_path: Path):
+    """`create_final` built its `ArtRequest` positionally, so `len(references)` landed in
+    `logo_path` — truthy — and the rebuilt fallback prompt ordered GPT to preserve a logo that
+    was never supplied. Only this path rebuilds the prompt, so only this path exposes it."""
+
+    class SpaceFailsOnTheFinal(ReplayableHF):
+        def render(self, spec: RenderSpec):
+            if max(spec.width, spec.height) > 1024:
+                raise TimeoutError("Space did not respond")
+            return super().render(spec)
+
+    gpt = CapturingGPT()
+    flow = ConceptArtWorkflow(
+        tmp_path, {Backend.HUGGING_FACE: SpaceFailsOnTheFinal(), Backend.GPT_IMAGE_2: gpt}
+    )
+    reference(tmp_path / "drone.png")
+    flow.add_reference("drone-bc", tmp_path / "drone.png", "White egg-shaped shell")
+    job = flow.create_draft(ArtRequest("drone-bc", "A drone", Backend.HUGGING_FACE))
+    flow.approve("drone-bc", job.id)
+
+    final = flow.create_final("drone-bc", job.id)
+
+    assert any("retried with GPT Image 2" in note for note in final.notes)
+    sent = gpt.specs[-1].prompt
+    assert "Preserve the supplied logo" not in sent
+
+
+def seeded_fallback(tmp_path: Path, hf) -> tuple[ConceptArtWorkflow, CapturingGPT]:
+    gpt = CapturingGPT()
+    flow = ConceptArtWorkflow(tmp_path, {Backend.HUGGING_FACE: hf, Backend.GPT_IMAGE_2: gpt})
+    reference(tmp_path / "drone.png")
+    flow.add_reference("drone-bc", tmp_path / "drone.png", "White egg-shaped shell")
+    return flow, gpt
+
+
+def test_a_fallback_draft_records_the_prompt_gpt_actually_received(tmp_path: Path):
+    """The record named the HF prompt beside `effective_backend: gpt-image-2` — two different
+    generations described as one. The UI prints this field as "Prompt sent to the provider"."""
+
+    class Asleep(DeterministicProvider):
+        backend = Backend.HUGGING_FACE
+
+        def render(self, spec: RenderSpec):
+            raise TimeoutError("Space did not respond")
+
+    flow, gpt = seeded_fallback(tmp_path, Asleep())
+    job = flow.create_draft(ArtRequest("drone-bc", "A drone", Backend.HUGGING_FACE))
+
+    recorded = job.artifacts["draft"]
+    assert recorded["effective_backend"] == str(Backend.GPT_IMAGE_2)
+    assert recorded["prompt"] == gpt.specs[0].prompt
+    assert recorded["prompt"].startswith("Concept art. Subject:")
+
+
+def test_a_fallback_final_records_the_prompt_gpt_actually_received(tmp_path: Path):
+    class SpaceFailsOnTheFinal(ReplayableHF):
+        def render(self, spec: RenderSpec):
+            if max(spec.width, spec.height) > 1024:
+                raise TimeoutError("Space did not respond")
+            return super().render(spec)
+
+    flow, gpt = seeded_fallback(tmp_path, SpaceFailsOnTheFinal())
+    job = flow.create_draft(ArtRequest("drone-bc", "A drone", Backend.HUGGING_FACE))
+    flow.approve("drone-bc", job.id)
+    final = flow.create_final("drone-bc", job.id)
+
+    recorded = final.artifacts["final"]
+    assert recorded["effective_backend"] == str(Backend.GPT_IMAGE_2)
+    assert recorded["prompt"] == gpt.specs[-1].prompt
+
+
+def test_a_draft_that_does_not_fall_back_still_records_the_prompt_it_sent(tmp_path: Path):
+    hf = ReplayableHF()
+    flow = ConceptArtWorkflow(tmp_path, {Backend.HUGGING_FACE: hf})
+    job = flow.create_draft(ArtRequest("drone-bc", "A drone", Backend.HUGGING_FACE))
+
+    recorded = job.artifacts["draft"]
+    assert recorded["effective_backend"] == str(Backend.HUGGING_FACE)
+    assert recorded["prompt"] == hf.specs[0].prompt
+    assert recorded["prompt"].startswith("drone-bc A drone")

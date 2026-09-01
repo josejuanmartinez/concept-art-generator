@@ -2,13 +2,16 @@
 
 from pathlib import Path
 
+import gradio as gr
 import pytest
 from PIL import Image
 
 from concept_art_generator import ui
 from concept_art_generator.art_models import ART_MODEL_NAMES, BY_NAME
-from concept_art_generator.models import ArtRequest, Backend
+from concept_art_generator.models import DEFAULT_BACKGROUND_MODEL, ArtRequest, Backend
+from concept_art_generator.prompts import build_prompt
 from concept_art_generator.providers import DeterministicProvider, RenderedImage, RenderSpec
+from concept_art_generator.references import MAX_REFERENCE_IMAGES
 from concept_art_generator.workflow import ConceptArtWorkflow
 
 
@@ -71,10 +74,19 @@ def test_caption_progress_wording():
     assert "1 of 2 references captioned" in ui.caption_progress({"a.png": "x", "b.png": ""})
 
 
-def test_every_art_model_offers_its_own_example_prompt():
+def test_every_art_model_offers_its_own_example_prompt_with_the_trigger_prefix():
     assert set(ui.EXAMPLE_PROMPTS) == set(ART_MODEL_NAMES)
     for name, prompt in ui.EXAMPLE_PROMPTS.items():
-        assert prompt == BY_NAME[name].example_prompt
+        model = BY_NAME[name]
+        assert prompt == f"{model.trigger} {model.example_prompt}"
+        assert prompt.count(model.trigger) == 1
+
+
+@pytest.mark.parametrize("backend", list(Backend))
+def test_the_offered_example_survives_both_backends_without_doubling_the_trigger(backend):
+    for name, prompt in ui.EXAMPLE_PROMPTS.items():
+        built = build_prompt(ArtRequest(name, prompt, backend), {})
+        assert built.count(BY_NAME[name].trigger) == 1
 
 
 def test_the_gallery_is_paged_and_scoped_to_one_art_model(flow, tmp_path):
@@ -200,3 +212,25 @@ def test_txt_captions_remove_the_need_to_describe(counted, tmp_path):
 
     assert workflow.uncaptioned_references("drone-bc") == []
     assert agent.calls == []
+
+
+def test_the_generate_tab_offers_only_model_prompt_and_backend(flow):
+    """The knobs are gone from the UI, so they cannot drift from the defaults below."""
+    demo = ui.build_ui(flow)
+    knobs = [
+        (type(block).__name__, getattr(block, "label", None))
+        for block in demo.blocks.values()
+        if isinstance(block, (gr.Slider, gr.Checkbox, gr.Number, gr.Accordion))
+    ]
+    assert knobs == []
+
+
+def test_the_settings_the_ui_stopped_sending_are_the_art_request_defaults():
+    """`ArtRequest`'s defaults are now the only place these live; changing one changes the UI."""
+    request = ArtRequest("drone-bc", "A drone", Backend.HUGGING_FACE)
+    assert request.transparent is True
+    assert request.reference_count == MAX_REFERENCE_IMAGES == 16
+    assert request.negative_prompt == ""
+    assert request.seed is None
+    assert (request.steps, request.guidance_scale, request.lora_scale) == (28, 4.0, 1.25)
+    assert request.background_model == DEFAULT_BACKGROUND_MODEL

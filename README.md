@@ -181,6 +181,11 @@ The two backends need genuinely different prompts, so `src/concept_art_generator
 single `build_prompt(request, descriptions, backend)` that dispatches on the backend. It is the only
 place a generation prompt is constructed.
 
+Both shapes start with the art model's trigger word — `drone-bc A drone ...` — so a prompt reads the
+same whichever backend it went to. It is prepended for you and never doubled up if you type it
+yourself. What the trigger *means* differs: for Hugging Face it is the trained token the LoRA fires
+on; for GPT Image 2 it is only a label, and the style still comes from the references.
+
 ### Hugging Face + LoRA — the trained caption shape
 
 Each LoRA was trained on captions of one exact shape, so the prompt is restricted to that shape and
@@ -226,14 +231,14 @@ to GPT Image 2.
 
 ### GPT Image 2 — our own style-director prompt from the references
 
-There is no LoRA and no trigger word here, so **none of the caption shape above applies**. GPT Image
-2 gets our own style-director prompt instead: the art model's reference images are attached to the edit
-request, and the style descriptions extracted from those references are restated in the prompt as
-notes, so the requirement is explicit rather than implied. Write a plain subject line and let the
-references carry the style.
+There is no LoRA here, so **none of the caption shape above applies** beyond the leading trigger
+word, which rides along as a label. GPT Image 2 gets our own style-director prompt instead: the art
+model's reference images are attached to the edit request, and the style descriptions extracted from
+those references are restated in the prompt as notes, so the requirement is explicit rather than
+implied. Write a plain subject line and let the references carry the style.
 
 ```text
-Concept art. Subject: An armored street racer. Match only the visual language
+Concept art. Subject: drone-bc An armored street racer. Match only the visual language
 of the attached reference images: silhouette discipline, materials, palette,
 lighting and rendering style. Style extracted from those references:
 - White egg-shaped drone shell with lime thruster rings
@@ -244,8 +249,9 @@ Single isolated subject, centered, no scenery, no text, no watermark, transparen
 ### Fallback and replay
 
 When a Hugging Face request falls back to GPT Image 2, the prompt is **rebuilt** in the GPT shape
-above — the trigger word means nothing to it, and it needs the reference-derived style instead. An HF
-final replays the approved draft's prompt byte for byte.
+above — the trained style keywords mean nothing to it, and it needs the reference-derived style
+instead. The trigger prefix survives the rebuild. An HF final replays the approved draft's prompt
+byte for byte.
 
 ## References and captions
 
@@ -334,6 +340,10 @@ concept-art-ui
 # http://127.0.0.1:8000
 ```
 
+Ctrl+C stops it straight away, even with tabs still open: each open tab holds a Gradio heartbeat
+stream that uvicorn would otherwise wait on forever, so `main()` closes those streams as it exits
+and caps the graceful shutdown at `SHUTDOWN_GRACE_SECONDS`.
+
 The front end is a Gradio app adapted from the Qwen Image LoRA Studio, so it looks and behaves like
 the tool the LoRAs were trained in. Three tabs:
 
@@ -343,13 +353,16 @@ the tool the LoRAs were trained in. Three tabs:
   caption .txt files*, by typing and pressing *Save captions on this page*, or with *Describe blank
   ones with GPT*, which fills only the empty ones and shows a progress bar while it runs. The status
   line tells you how many are still uncaptioned.
-- **Generate** is the studio's Generate panel plus the approval gate. Pick the art model — which
-  picks its LoRA — choose the backend, and the prompt box preloads that model's own example so you
-  edit rather than start blank (anything you type yourself is never overwritten). Hugging Face
-  sampler settings live in a collapsed accordion. **Create 1024px draft** renders over a
+- **Generate** is the studio's Generate panel plus the approval gate, cut down to the three
+  choices that actually vary: the art model — which picks its LoRA — the prompt, and the backend.
+  The prompt box preloads that model's own example so you edit rather than start blank (anything
+  you type yourself is never overwritten). Everything else is fixed at the `ArtRequest` defaults —
+  transparent output, up to 16 references, and the sampler settings the LoRAs were trained for —
+  so there is no accordion of knobs to get wrong. **Create 1024px draft** renders over a
   checkerboard so transparency is visible, and prints the exact prompt sent to the provider.
   **Approve draft** / **Request changes** are enabled only for a `draft_ready` job, and
-  **Export 2K final** stays disabled until that draft is approved.
+  **Export 2K final** stays disabled until that draft is approved. Picking `huggingface` still
+  falls back to GPT Image 2 on its own if the Space is asleep or errors; the job's notes record it.
 - **Jobs** lists every job for the selected art model with its state, backend and prompt.
 
 The JSON API is mounted on the same server, so scripts and agents can drive it too:
@@ -413,6 +426,8 @@ Both routes create a 1024×1024 draft first and require explicit approval before
 
 When Hugging Face is selected, it is always tried first. A timeout, forbidden response, malformed response, or other provider error automatically retries through GPT Image 2 using only that art model's own references; the job audit notes record the fallback. If GPT Image 2 is unavailable or the model has no references, the job fails safely instead of borrowing another model's style.
 
+References are required for GPT Image 2 and optional for Hugging Face — the LoRA carries the style, and only `GPTImage2Provider` reads them. Adding them to a Hugging Face model is still worth it: they are what the fallback has to work with if the Space is asleep.
+
 Final exports are **2048×2048** and preserve their PNG alpha channel. For an HF final, the Space repeats the same deterministic 1024×1024 generation and applies tiled Swin2SR x2. The only stage-specific HF inference switch is `upscale_to_2k`: `false` for the draft and `true` after approval. `remove_background` remains identical between stages and follows the optional Transparent PNG selection. GPT Image 2 uses the approved draft as its primary edit input plus up to 15 selected style references, then generates the high-quality 2K final.
 
 The equivalent Space request options are:
@@ -462,7 +477,7 @@ The canonical job record remains in `data/models/<art-model>/jobs/<job-id>.json`
 | `config.py` | `load_settings()`: optionally reads a `.env` from the working directory with `override=False`, so system environment variables always win. |
 | `models.py` | Dataclasses and enums: `ArtRequest`, `ArtJob`, `Backend`, `JobState`, `DEFAULT_BACKGROUND_MODEL`, plus job JSON load/save. Not the art-model catalogue — that is `art_models.py`. |
 | `art_models.py` | The closed catalogue of the three art models — trigger word, LoRA slug, subject keyword, style keywords, example prompt — and `resolve_model()`, which refuses anything else. |
-| `prompts.py` | `build_prompt()` — the one place a prompt is built, dispatching on backend: the trained LoRA caption shape for Hugging Face, reference-extracted style for GPT Image 2. |
+| `prompts.py` | `build_prompt()` — the one place a prompt is built, dispatching on backend: the trained LoRA caption shape for Hugging Face, reference-extracted style for GPT Image 2. Both are prefixed with the art model's trigger word. |
 | `workspace.py` | `ModelWorkspace` — the isolation boundary. Refuses an uncatalogued art model, owns every path under `data/models/<art-model>/`, stores reference descriptions, and computes reference hashes. |
 | `references.py` | `OpenAIReferenceAgent` (GPT-written descriptions and text-only 16-of-N ranking) and the `.txt` caption helpers that implement the studio's `drone.txt → drone.png` convention. |
 | `agents.py` | `QualityGate` — rejects an opaque PNG before export. |

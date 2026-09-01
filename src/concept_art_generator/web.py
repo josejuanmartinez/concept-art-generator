@@ -206,6 +206,27 @@ def asset(art_model: str, stage: str, job_id: str):
     return FileResponse(path, media_type="image/png")
 
 
+# Ctrl+C used to hang on "Waiting for connections to close". Each open browser tab holds a
+# `/gradio_api/heartbeat/<session>` SSE stream for its whole life, and uvicorn's graceful shutdown
+# waits for open connections to finish — that one never does on its own. Gradio ends those streams
+# when its app's `stop_event` is set, but only `demo.launch()` sets it; a mounted app has nobody to.
+# So set it ourselves on the way out, and keep a deadline as the backstop for anything else stuck.
+SHUTDOWN_GRACE_SECONDS = 5
+
+
+def stop_events(mounted) -> list:
+    """The mounted Gradio app's `stop_event`, which ends its heartbeat streams when set.
+
+    Found by walking the mounts rather than assumed, so a Gradio that stops exposing it costs us
+    the tidy shutdown and not the shutdown itself — `timeout_graceful_shutdown` still applies.
+    """
+    return [
+        route.app.stop_event
+        for route in getattr(mounted, "routes", [])
+        if hasattr(getattr(route, "app", None), "stop_event")
+    ]
+
+
 def main() -> None:
     """Serve the Gradio front end at / with this JSON API mounted alongside it."""
     import gradio as gr
@@ -213,8 +234,22 @@ def main() -> None:
 
     from .ui import APP_CSS, build_ui
 
-    uvicorn.run(
-        gr.mount_gradio_app(app, build_ui(workflow), path="/", css=APP_CSS),
-        host="127.0.0.1",
-        port=8000,
-    )
+    mounted = gr.mount_gradio_app(app, build_ui(workflow), path="/", css=APP_CSS)
+    events = stop_events(mounted)
+
+    class Server(uvicorn.Server):
+        def handle_exit(self, sig, frame):
+            # Runs on the main thread; the set() lands on the event loop's next tick, which is
+            # what lets the heartbeat streams close before uvicorn starts waiting on them.
+            for event in events:
+                event.set()
+            super().handle_exit(sig, frame)
+
+    Server(
+        uvicorn.Config(
+            mounted,
+            host="127.0.0.1",
+            port=8000,
+            timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS,
+        )
+    ).run()

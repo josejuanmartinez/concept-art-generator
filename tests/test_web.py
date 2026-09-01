@@ -173,3 +173,33 @@ def test_the_api_serves_no_markup():
     source = Path(web.__file__).read_text(encoding="utf-8")
     for markup in ("<form", "<div", "<table", "<html", "<script"):
         assert markup not in source
+
+
+def test_the_mounted_gradio_app_exposes_the_stop_event_shutdown_needs(tmp_path):
+    """Ctrl+C hangs on the heartbeat SSE streams unless this event is found and set.
+
+    `stop_events` walks Gradio internals, so this is the test that fails loudly if a Gradio
+    upgrade moves them — otherwise the hang comes back quietly.
+    """
+    import asyncio
+
+    import gradio as gr
+    from fastapi import FastAPI
+
+    from concept_art_generator.ui import build_ui
+
+    flow = ConceptArtWorkflow(tmp_path, {Backend.HUGGING_FACE: OfflineHuggingFace()})
+    mounted = gr.mount_gradio_app(FastAPI(), build_ui(flow), path="/")
+
+    events = web.stop_events(mounted)
+    assert events, "Gradio no longer exposes stop_event on the mounted app"
+    for event in events:
+        assert isinstance(event, asyncio.Event)
+        assert not event.is_set()
+        event.set()
+
+
+def test_stop_events_is_empty_rather_than_raising_on_a_plain_app():
+    from fastapi import FastAPI
+
+    assert web.stop_events(FastAPI()) == []

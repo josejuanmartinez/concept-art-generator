@@ -19,14 +19,18 @@ from pathlib import Path
 import gradio as gr
 
 from .art_models import ART_MODEL_NAMES, ART_MODELS, BY_NAME
-from .models import DEFAULT_BACKGROUND_MODEL, ArtRequest, Backend, JobState
+from .models import ArtRequest, Backend, JobState
+from .prompts import with_trigger
+from .references import MAX_REFERENCE_IMAGES
 from .workflow import ConceptArtWorkflow
 
 GALLERY_COLUMNS = 4
 GALLERY_ROWS = 2
 GALLERY_PAGE_SIZE = GALLERY_COLUMNS * GALLERY_ROWS
 
-EXAMPLE_PROMPTS = {model.name: model.example_prompt for model in ART_MODELS}
+# Pre-filled in the Generate box, so what you see is what gets sent: both backends are given
+# `<trigger> <subject>`, and `build_prompt` will not double the trigger up if it is already there.
+EXAMPLE_PROMPTS = {model.name: with_trigger(model, model.example_prompt) for model in ART_MODELS}
 
 APP_CSS = """
 /* Hidden columns free their space, so a partly filled last row stretched its one visible
@@ -183,34 +187,14 @@ def build_ui(workflow: ConceptArtWorkflow) -> gr.Blocks:
         untouched = not (current_prompt or "").strip() or current_prompt in EXAMPLE_PROMPTS.values()
         return gr.update(value=example) if untouched else gr.update()
 
-    def create_draft(
-        art_model,
-        prompt,
-        backend,
-        transparent,
-        reference_count,
-        negative_prompt,
-        seed,
-        steps,
-        guidance,
-        lora_scale,
-        background_model,
-    ):
-        job = workflow.create_draft(
-            ArtRequest(
-                art_model,
-                prompt,
-                Backend(backend),
-                int(reference_count),
-                transparent=bool(transparent),
-                negative_prompt=negative_prompt or "",
-                seed=int(seed) if seed is not None else None,
-                steps=int(steps),
-                guidance_scale=float(guidance),
-                lora_scale=float(lora_scale),
-                background_model=background_model or DEFAULT_BACKGROUND_MODEL,
-            )
-        )
+    def create_draft(art_model, prompt, backend):
+        """Model, prompt, backend — everything else is an `ArtRequest` default.
+
+        Transparency, the 16-reference budget and the HF inference settings are fixed rather than
+        exposed: they were only ever set to their defaults, and a knob nobody moves is a knob that
+        can be got wrong. `ArtRequest`'s defaults are the single place they live now.
+        """
+        job = workflow.create_draft(ArtRequest(art_model, prompt, Backend(backend)))
         return (job.id, job.draft_path, None, describe(job), *approval_gate(job))
 
     def approve(art_model, job_id, note):
@@ -344,39 +328,23 @@ def build_ui(workflow: ConceptArtWorkflow) -> gr.Blocks:
                 lines=3,
                 info=(
                     "Subject first, then the details, then that model's style keywords. The "
-                    "trigger word is prepended for you on the Hugging Face backend."
+                    "trigger word is prepended for you on both backends."
                 ),
             )
-            with gr.Row():
-                backend = gr.Radio(
-                    [b.value for b in Backend],
-                    value=Backend.HUGGING_FACE.value,
-                    label="Backend",
-                    info=(
-                        "huggingface uses this model's private LoRA. gpt-image-2 uses no LoRA and "
-                        "sends this model's reference images instead."
-                    ),
-                )
-                transparent = gr.Checkbox(
-                    value=True,
-                    label="Transparent PNG",
-                    info="Rejects an opaque result rather than exporting a non-transparent asset.",
-                )
-                reference_count = gr.Slider(
-                    1, 16, value=16, step=1, label="References to use",
-                    info="Upper bound; GPT ranks descriptions when the model has more.",
-                )
-            with gr.Accordion("Hugging Face inference settings", open=False):
-                negative_prompt = gr.Textbox(label="Negative prompt")
-                with gr.Row():
-                    steps = gr.Slider(1, 80, value=28, step=1, label="Steps")
-                    guidance = gr.Slider(0, 20, value=4.0, step=0.1, label="Guidance")
-                    lora_scale = gr.Slider(0, 2, value=1.25, step=0.05, label="LoRA scale")
-                with gr.Row():
-                    seed = gr.Number(label="Seed (empty = random)", precision=0)
-                    background_model = gr.Textbox(
-                        value=DEFAULT_BACKGROUND_MODEL, label="Background removal model"
-                    )
+            backend = gr.Radio(
+                [b.value for b in Backend],
+                value=Backend.HUGGING_FACE.value,
+                label="Backend",
+                info=(
+                    "huggingface uses this model's private LoRA, and falls back to gpt-image-2 "
+                    "automatically if the Space is asleep or errors. gpt-image-2 uses no LoRA and "
+                    "sends this model's reference images instead."
+                ),
+            )
+            gr.Markdown(
+                f"Output is always a transparent PNG, built from up to {MAX_REFERENCE_IMAGES} of "
+                "this model's references, at the inference settings the LoRAs were trained for."
+            )
             draft_button = gr.Button("Create 1024px draft", variant="primary")
 
             job_state = gr.State(None)
@@ -406,10 +374,7 @@ def build_ui(workflow: ConceptArtWorkflow) -> gr.Blocks:
             gen_model.change(follow_model, [gen_model, prompt], prompt)
             draft_button.click(
                 create_draft,
-                [
-                    gen_model, prompt, backend, transparent, reference_count,
-                    negative_prompt, seed, steps, guidance, lora_scale, background_model,
-                ],
+                [gen_model, prompt, backend],
                 [job_state, draft_image, final_image, job_details, *gates],
             )
             approve_button.click(
