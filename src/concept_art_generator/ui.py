@@ -19,6 +19,7 @@ from pathlib import Path
 import gradio as gr
 
 from .art_models import ART_MODEL_NAMES, ART_MODELS, BY_NAME
+from .branding import MODEL_LOGOS
 from .models import ArtRequest, Backend, JobState
 from .prompts import with_trigger
 from .references import MAX_REFERENCE_IMAGES
@@ -31,6 +32,10 @@ GALLERY_PAGE_SIZE = GALLERY_COLUMNS * GALLERY_ROWS
 # Pre-filled in the Generate box, so what you see is what gets sent: both backends are given
 # `<trigger> <subject>`, and `build_prompt` will not double the trigger up if it is already there.
 EXAMPLE_PROMPTS = {model.name: with_trigger(model, model.example_prompt) for model in ART_MODELS}
+
+# Read off the branding table rather than typed out, so this panel cannot claim a model is
+# branded after `MODEL_LOGOS` says otherwise.
+BRANDED_MODELS = " and ".join(f"`{name}`" for name in sorted(MODEL_LOGOS))
 
 APP_CSS = """
 /* Hidden columns free their space, so a partly filled last row stretched its one visible
@@ -80,10 +85,12 @@ def describe(job) -> str:
     model = BY_NAME[job.art_model]
     lora = f" · LoRA `{job.lora_name}`" if job.lora_name else ""
     sent = job.artifacts.get("draft", {}).get("prompt", "")
+    stamped = job.artifacts.get("draft", {}).get("logo")
+    logo = f" · logo `{stamped}`" if stamped else ""
     return (
         f"### `{job.id}` — **{job.state}**\n"
         f"{job.art_model} · backend `{job.backend}`{lora} · "
-        f"transparent: {job.transparent} · trigger `{model.trigger}`\n\n"
+        f"transparent: {job.transparent} · trigger `{model.trigger}`{logo}\n\n"
         f"Prompt sent to the provider:\n\n```text\n{sent}\n```"
     )
 
@@ -347,7 +354,9 @@ def build_ui(workflow: ConceptArtWorkflow) -> gr.Blocks:
             )
             gr.Markdown(
                 f"Output is always a transparent PNG, built from up to {MAX_REFERENCE_IMAGES} of "
-                "this model's references, at the inference settings the LoRAs were trained for."
+                "this model's references, at the inference settings the LoRAs were trained for. "
+                f"{BRANDED_MODELS} carry their game logo in the bottom-left corner of both the "
+                "draft and the final; it is composited afterwards, never asked of the provider."
             )
             draft_button = gr.Button("Create 1024px draft", variant="primary")
 

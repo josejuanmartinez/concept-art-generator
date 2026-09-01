@@ -10,6 +10,7 @@ from PIL import Image
 
 from .agents import QualityGate
 from .art_models import resolve_model
+from .branding import stamp, stamp_bytes
 from .models import DEFAULT_BACKGROUND_MODEL, ArtJob, ArtRequest, Backend, JobState
 from .prompts import build_prompt
 from .providers import (
@@ -184,17 +185,22 @@ class ConceptArtWorkflow:
         if request.transparent:
             self.gate.require_transparency(rendered.png)
         destination = ws.image_path("drafts", job.id)
-        destination.write_bytes(rendered.png)
+        # The logo goes on after the transparency gate, so the gate still judges what the
+        # provider actually returned rather than a corner this pipeline painted itself.
+        png, logo = stamp_bytes(rendered.png, job.art_model)
+        destination.write_bytes(png)
         job.draft_path = str(destination)
         job.cost_usd += rendered.estimated_cost_usd
         job.generation_parameters = rendered.generation_parameters or {}
         job.artifacts["draft"] = self._artifact(
-            sent_prompt, effective_backend, rendered.provider_request_id, destination
+            sent_prompt, effective_backend, rendered.provider_request_id, destination, logo
         )
         job.notes.append(
             f"Effective backend: {effective_backend}; provider request: "
             f"{rendered.provider_request_id or 'not supplied'}"
         )
+        if logo:
+            job.notes.append(f"Stamped {logo} into the bottom-left corner of the draft.")
         job.save(ws.job_file(job.id))
         self._write_sidecar(ws, job, "draft")
         self._ledger(job, "draft")
@@ -323,15 +329,18 @@ class ConceptArtWorkflow:
                 (round(image.width * factor), round(image.height * factor)),
                 Image.Resampling.LANCZOS,
             )
+        image, logo = stamp(image, job.art_model)
         image.save(destination, "PNG")
         job.final_path, job.state = str(destination), JobState.FINAL_READY
         job.cost_usd += rendered.estimated_cost_usd
         job.artifacts["final"] = self._artifact(
-            sent_prompt, effective_backend, rendered.provider_request_id, destination
+            sent_prompt, effective_backend, rendered.provider_request_id, destination, logo
         )
         job.notes.append(
             f"Final effective backend: {effective_backend}; exported {image.width}x{image.height} PNG."
         )
+        if logo:
+            job.notes.append(f"Stamped {logo} into the bottom-left corner of the final.")
         job.save(ws.job_file(job.id))
         self._write_sidecar(ws, job, "final")
         self._ledger(job, "final")
@@ -460,7 +469,13 @@ class ConceptArtWorkflow:
             handle.write(json.dumps(record) + "\n")
 
     @staticmethod
-    def _artifact(prompt: str, backend: Backend, request_id: str | None, image_path: Path) -> dict:
+    def _artifact(
+        prompt: str,
+        backend: Backend,
+        request_id: str | None,
+        image_path: Path,
+        logo: str | None = None,
+    ) -> dict:
         model = (
             "gpt-image-2" if backend == Backend.GPT_IMAGE_2 else "Qwen-Image-2512 (private LoRA)"
         )
@@ -473,6 +488,7 @@ class ConceptArtWorkflow:
             "prompt": prompt,
             "provider_request_id": request_id,
             "dimensions": dimensions,
+            "logo": logo,
         }
 
     def _write_sidecar(self, ws: ModelWorkspace, job: ArtJob, stage: str) -> None:

@@ -186,6 +186,33 @@ reference images instead.
 Run `concept-art models` for the catalogue as JSON, including each example prompt in full. See
 [Prompt building](#prompt-building) for the shape a LoRA prompt must take.
 
+### Game logos
+
+Branding is a property of the art model, exactly like its LoRA and its references. Two of the three
+carry a game logo, vendored in the repository and named after the model that owns it:
+
+| Art model | Logo | Stamped |
+|---|---|---|
+| `drone-bc` | — | never |
+| `pilot-bc` | `src/concept_art_generator/assets/logos/pilot-bc.png` | every draft and final |
+| `pilot-mw` | `src/concept_art_generator/assets/logos/pilot-mw.png` | every draft and final |
+
+`branding.py` composites it into the **bottom-left corner** after generation, so the provider never
+sees a logo and cannot redraw, warp or invent lettering. The size is a ratio, not a pixel count —
+250px wide on a 1024px image, and scaled with the canvas from there — so branding reads identically
+at every stage: 125px on a 512px GPT draft, 250px on a 1024px draft, 500px on the 2048px final. The
+margin scales the same way (32px at 1024). The logo is applied *after* `QualityGate`, so the
+transparency check still judges what the provider actually returned.
+
+A vendored logo must carry its own transparency, or it stamps its background onto the asset. The
+supplied `pilot-mw` artwork was a white mark on an opaque black rectangle, so it was matted before
+vendoring - its luminance became its alpha channel, which preserves the anti-aliased edges a hard
+black key would have fringed, and it was cropped to the mark so the 250px is the mark rather than
+dead padding. A test holds both logos to that.
+
+The applied filename is recorded as `logo` in the job's artifact record and in the `.png.prompt`
+sidecar — `null` for `drone-bc` — so a verifier can confirm which logo an asset carries.
+
 ## Prompt building
 
 The two backends need genuinely different prompts, so `src/concept_art_generator/prompts.py` has a
@@ -598,6 +625,7 @@ The canonical job record remains in `data/models/<art-model>/jobs/<job-id>.json`
 | `.env.example` | Committed template for the four environment variables, with the two credentials commented out. Contains no values. |
 | `.gitignore` | Excludes `.env`, `data/`, caches, and build output. |
 | `docs/art-pipeline.png` | The pipeline diagram at the top of this README. |
+| `src/concept_art_generator/assets/logos/` | The game logos stamped onto `pilot-bc` and `pilot-mw` art. Committed, so a checkout brands identically. |
 
 ### Source — `src/concept_art_generator/`
 
@@ -611,6 +639,8 @@ The canonical job record remains in `data/models/<art-model>/jobs/<job-id>.json`
 | `workspace.py` | `ModelWorkspace` — the isolation boundary. Refuses an uncatalogued art model, owns every path under `data/models/<art-model>/`, stores reference descriptions, and computes reference hashes. |
 | `references.py` | `OpenAIReferenceAgent` (GPT-written descriptions and text-only 16-of-N ranking) and the `.txt` caption helpers that implement the studio's `drone.txt → drone.png` convention. |
 | `agents.py` | `QualityGate` — rejects an opaque PNG before export. |
+| `branding.py` | The per-art-model game logo: which models are branded, and the bottom-left composite scaled to the canvas. `drone-bc` is left untouched. |
+| `assets/logos/` | The vendored game logos, one PNG per branded art model, named after it. |
 | `providers.py` | `RenderSpec` / `RenderedImage`, `HuggingFaceSpaceProvider` (`POST /v1/generate`), `GPTImage2Provider` (images-edit endpoint), and `DeterministicProvider` for offline tests. |
 | `workflow.py` | `ConceptArtWorkflow` — the shared core behind all three entry points: reference and caption handling, LoRA validation, draft, approve/reject, final with parameter replay, HF→GPT fallback, sidecars, and the usage ledger. |
 | `cli.py` | The `concept-art` command: `add-reference`, `draft`, `approve`, `reject`, `final`, `show`, `models`, `jobs`. Every art-model argument is restricted to the three. |
@@ -635,6 +665,7 @@ The canonical job record remains in `data/models/<art-model>/jobs/<job-id>.json`
 | `test_prompts.py` | Both prompt shapes: trigger prepended once, style keywords appended when missing, no wrapper text on the LoRA prompt, reference style notes in the GPT prompt, identical draft/final HF prompt, and a rebuilt prompt on the GPT fallback. |
 | `test_captions.py` | Sibling `.txt` captions, caption priority, stem matching, the API upload/caption routes, that uploaded `.txt` captions are never overridden, and that re-adding a reference keeps its caption and spends no GPT call. |
 | `test_web.py` | The JSON API end to end for both backends: draft → approve → final, the blocked final before approval, per-model job listing, and that markup stays out of `web.py`. |
+| `test_branding.py` | Each branded model ships its own logo, `drone-bc` art is returned untouched, bottom-left placement and aspect ratio, the 512/1024/2048 scaling ratio, and the `logo` field recorded on draft and final. |
 | `test_ui.py` | The Gradio app builds, adding references contacts no provider, captioning touches only blank entries, and `approval_gate()` keeps the 2K final locked for every state except `approved`. |
 
 ### Generated at runtime — `data/` (gitignored)
@@ -646,8 +677,8 @@ data/
    ├─ references/                    # this art model's reference images only
    │  └─ descriptions.json           # filename → stored description
    ├─ jobs/<job-id>.json             # canonical job record
-   ├─ drafts/<job-id>.png            # 1024×1024 draft (+ .png.prompt sidecar)
-   └─ finals/<job-id>.png            # 2048×2048 final (+ .png.prompt sidecar)
+   ├─ drafts/<job-id>.png            # 1024×1024 draft, logo stamped (+ .png.prompt sidecar)
+   └─ finals/<job-id>.png            # 2048×2048 final, logo stamped (+ .png.prompt sidecar)
 ```
 
 ## Test
