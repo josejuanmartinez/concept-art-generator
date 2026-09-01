@@ -41,25 +41,25 @@ own example.
 
 `drone-bc`
 
-> A drone with a smooth white and grey egg-shaped shell, lime green thruster rings on each side, a
+> drone-bc A drone with a smooth white and grey egg-shaped shell, lime green thruster rings on each side, a
 > glowing orange vent slot on its face, two upright yellow-tipped blade fins above and one below,
 > stylized 3D rendered game asset, glossy cel-shaded surfaces, plain white background
 
 `pilot-bc`
 
-> A pilot in a horned imp mask and hood, wearing a green graffiti-covered hooded jacket and dark
+> pilot-bc A pilot in a horned imp mask and hood, wearing a green graffiti-covered hooded jacket and dark
 > cargo trousers, holding a curved black blade, in colourful high-top sneakers, full body, flat
 > vector game art, plain white background
 
 `pilot-mw`
 
-> A pilot undead soldier with a blazing skull head wreathed in orange fire, heavy charcoal combat
+> pilot-mw A pilot undead soldier with a blazing skull head wreathed in orange fire, heavy charcoal combat
 > armour lined with glowing orange lights, a rifle held at his hip, semi-realistic painted digital
 > game art, soft rim lighting, plain white background
 
 So a new `drone-bc` subject keeps the same opening and closing shape:
 
-> A drone with a squat black and orange armoured hull, twin stubby side thrusters glowing cyan, a
+> drone-bc A drone with a squat black and orange armoured hull, twin stubby side thrusters glowing cyan, a
 > single recessed sensor eye, folded landing struts beneath, stylized 3D rendered game asset,
 > glossy cel-shaded surfaces, plain white background
 

@@ -181,11 +181,14 @@ def build_ui(workflow: ConceptArtWorkflow) -> gr.Blocks:
 
     # --- Generate tab helpers -----------------------------------------------
 
-    def follow_model(art_model, current_prompt):
-        """Offer the model's own example while the box is untouched; never discard typed text."""
-        example = EXAMPLE_PROMPTS.get(art_model, "")
-        untouched = not (current_prompt or "").strip() or current_prompt in EXAMPLE_PROMPTS.values()
-        return gr.update(value=example) if untouched else gr.update()
+    def follow_model(art_model):
+        """Load the newly chosen model's example prompt, replacing whatever was in the box.
+
+        A prompt is model-specific in both halves — the trigger word and the trained style
+        keywords — so text carried across a model change asks one LoRA for another's style
+        under a stale prefix. Switching models is a fresh start, not an edit.
+        """
+        return gr.update(value=EXAMPLE_PROMPTS.get(art_model, ""))
 
     def create_draft(art_model, prompt, backend):
         """Model, prompt, backend — everything else is an `ArtRequest` default.
@@ -328,7 +331,8 @@ def build_ui(workflow: ConceptArtWorkflow) -> gr.Blocks:
                 lines=3,
                 info=(
                     "Subject first, then the details, then that model's style keywords. The "
-                    "trigger word is prepended for you on both backends."
+                    "trigger word is prepended for you on both backends. Switching art model "
+                    "loads that model's example, replacing what is here."
                 ),
             )
             backend = gr.Radio(
@@ -371,7 +375,7 @@ def build_ui(workflow: ConceptArtWorkflow) -> gr.Blocks:
             final_button = gr.Button("Export 2K final", variant="primary", interactive=False)
 
             gates = [approve_button, reject_button, final_button]
-            gen_model.change(follow_model, [gen_model, prompt], prompt)
+            gen_model.change(follow_model, gen_model, prompt)
             draft_button.click(
                 create_draft,
                 [gen_model, prompt, backend],

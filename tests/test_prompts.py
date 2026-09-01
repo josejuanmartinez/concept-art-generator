@@ -143,3 +143,15 @@ def test_gpt_fallback_rebuilds_the_prompt_in_the_reference_shape(tmp_path: Path)
     assert sent.startswith("Concept art. Subject: drone-bc A drone")
     assert sent.count("drone-bc") == 1
     assert "- White egg-shaped drone shell, lime thruster rings" in sent
+
+
+@pytest.mark.parametrize("model", ART_MODELS)
+def test_a_trigger_carried_over_from_another_art_model_is_stripped(model):
+    """A prompt switched over from another model still wears that model's prefix; prepending on
+    top of it would name two styles in one prompt."""
+    built = lora_prompt(model, "pilot-bc A pilot in a horned imp mask")
+
+    assert built.startswith(f"{model.trigger} A pilot in a horned imp mask")
+    for other in ART_MODELS:
+        if other.name != model.name:
+            assert other.trigger not in built

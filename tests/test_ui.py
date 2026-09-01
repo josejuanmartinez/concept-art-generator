@@ -234,3 +234,16 @@ def test_the_settings_the_ui_stopped_sending_are_the_art_request_defaults():
     assert request.seed is None
     assert (request.steps, request.guidance_scale, request.lora_scale) == (28, 4.0, 1.25)
     assert request.background_model == DEFAULT_BACKGROUND_MODEL
+
+
+def test_switching_art_model_replaces_the_prompt_with_that_models_example(flow):
+    """The prompt is model-specific in both halves, so it must not survive a model change."""
+    demo = ui.build_ui(flow)
+    changed = [
+        event for event in demo.fns.values() if getattr(event.fn, "__name__", "") == "follow_model"
+    ]
+    assert len(changed) == 1
+    follow_model = changed[0].fn
+
+    for name in ART_MODEL_NAMES:
+        assert follow_model(name)["value"] == ui.EXAMPLE_PROMPTS[name]

@@ -1,10 +1,21 @@
 # Concept Art Generator
 
-![TinyBytes Art Pipeline — isolated references, two generation backends (HF LoRA or GPT Image 2), human approval, transparent 2K finals](docs/art-pipeline.png)
+<table>
+<tr>
+<td width="50%"><img src="docs/Example1.png" alt="Generate tab: art model, prompt and backend, with a 1024px draft on a transparency checkerboard awaiting approval"></td>
+<td width="50%"><img src="docs/Example2.png" alt="Generate tab: the same three controls driving a second draft, the 2K final still locked behind Approve draft"></td>
+</tr>
+</table>
+
+<p align="center"><em>The Generate tab. Three choices — art model, prompt, backend — then a
+1024px draft on a transparency checkerboard. <strong>Export 2K final</strong> stays locked until a
+human presses <strong>Approve draft</strong>.</em></p>
 
 A production-minded TinyBytes assessment project: concept art organised by **art model** — a named visual style that owns its own reference images and its own trained private LoRA. Three exist (`drone-bc`, `pilot-bc`, `pilot-mw`) and their references never mix. Every asset passes a human approval gate: **low-resolution draft → explicit approval → transparent final**.
 
 ## Architecture
+
+![TinyBytes Art Pipeline — isolated references, two generation backends (HF LoRA or GPT Image 2), human approval, transparent 2K finals](docs/art-pipeline.png)
 
 There are **three independent ways to drive the pipeline**, and they all sit on top of one shared
 core. The agent path is optional: the UI and the CLI involve no Claude at all.
@@ -196,6 +207,8 @@ nothing else is added:
 ```
 
 The trigger is the LoRA name without the owner prefix, and it is prepended for you — do not type it.
+Any catalogued trigger already at the front of what you type is stripped first, so a prompt pasted
+from another art model cannot smuggle that model's prefix through.
 That LoRA's style keywords are appended when you leave them out. No scene description, no framing
 boilerplate, and deliberately **no "transparent background" instruction**: the trained captions say
 `plain white background`, and the Space strips it server-side via `remove_background`, so asking the
@@ -329,6 +342,49 @@ The orchestrator then:
 6. Delegates the final export, then invokes `verifier` last.
 7. Routes any failure back to `technical-artist`, never to `verifier`.
 
+Three subagents in `.claude/agents/` split the work so that no single one can both choose the
+style and ship the asset:
+
+| Agent | Access | What it does | What it never does |
+|---|---|---|---|
+| `style-director` | read-only | Reads that art model's references and captions, then returns a brief and one prompt string. | Runs any generating command, or opens another art model's folder. |
+| `technical-artist` | read/write | Runs exactly one `concept-art` command per instruction, then reports the job ID and stops. | Approves a draft, retries with a changed prompt, or exports an unapproved final. |
+| `verifier` | read-only | Re-reads the job JSON, the exported PNG and `data/usage.jsonl`, and reports pass or fail. | Fixes anything — failures route back to `technical-artist`. |
+
+**A worked example.** Asking for a new character in natural language, and what the orchestrator does
+with it:
+
+```text
+you ▸ I want to generate a character for my game Modern Warfare with pilot-mw model
+
+     Confirms pilot-mw is the single art model in scope, then asks for the subject
+     and the backend — it will not guess either.
+
+you ▸ a winter sniper in a ghillie wrap · gpt-image-2
+
+  ├─ style-director   reads data/models/pilot-mw/references/descriptions.json and returns
+  │                   one prompt string built to this model's caption grammar
+  ├─ technical-artist runs exactly one command, then stops:
+  │
+  │     concept-art draft pilot-mw "pilot-mw A pilot winter sniper in a shaggy white
+  │       ghillie wrap of frayed cloth strands over grey-white arctic fatigues, ...,
+  │       semi-realistic painted digital game art, soft rim lighting,
+  │       plain white background" --backend gpt-image-2
+  │
+  └─ job 61eeec8baca5 — draft_ready
+     data/models/pilot-mw/drafts/61eeec8baca5.png
+
+     Stops here and waits for a human approval decision. "Looks fine" is not approval:
+     the gate is concept-art approve pilot-mw 61eeec8baca5, or reject with feedback.
+```
+
+Before reporting that stage as done, the orchestrator re-reads the job JSON rather than trusting the
+subagent's summary — that the state is really `draft_ready`, that `lora_name` is this art model's
+LoRA (or `null`, for a `gpt-image-2` job, which uses no LoRA at all), that every entry in
+`reference_files` resolves under `data/models/pilot-mw/references/`, and that `data/usage.jsonl`
+gained a `draft` record. Only after approval does `concept-art final` become reachable, and the
+`verifier` pass runs last.
+
 Agents drive the same CLI documented below; every command prints JSON, so
 `concept-art jobs <art-model>` and `concept-art show <art-model> <job-id>` are the read-back points. See `CLAUDE.md` for the full rule
 set the orchestrator follows.
@@ -355,8 +411,9 @@ the tool the LoRAs were trained in. Three tabs:
   line tells you how many are still uncaptioned.
 - **Generate** is the studio's Generate panel plus the approval gate, cut down to the three
   choices that actually vary: the art model — which picks its LoRA — the prompt, and the backend.
-  The prompt box preloads that model's own example so you edit rather than start blank (anything
-  you type yourself is never overwritten). Everything else is fixed at the `ArtRequest` defaults —
+  The prompt box preloads that model's own example so you edit rather than start blank, and
+  switching the art model reloads that model's example: a prompt names one style and one trigger
+  word, so carrying it across a model change would ask one LoRA for another's style. Everything else is fixed at the `ArtRequest` defaults —
   transparent output, up to 16 references, and the sampler settings the LoRAs were trained for —
   so there is no accordion of knobs to get wrong. **Create 1024px draft** renders over a
   checkerboard so transparency is visible, and prints the exact prompt sent to the provider.
@@ -364,6 +421,17 @@ the tool the LoRAs were trained in. Three tabs:
   **Export 2K final** stays disabled until that draft is approved. Picking `huggingface` still
   falls back to GPT Image 2 on its own if the Space is asleep or errors; the job's notes record it.
 - **Jobs** lists every job for the selected art model with its state, backend and prompt.
+
+![References tab: art model selector, add-images and captioning controls, and the paged reference gallery with a caption box under every thumbnail](docs/ui-references.png)
+
+<em>References — the art model selector picks the folder the images land in, so a reference can only
+ever belong to one model.</em>
+
+The **Generate** tab is the one in the two screenshots at the top of this README.
+
+![Jobs tab: art model selector, refresh button, and a table of jobs with their id, state, backend and prompt](docs/ui-jobs.png)
+
+<em>Jobs — the same records `concept-art jobs <art-model>` prints, for the selected model only.</em>
 
 The JSON API is mounted on the same server, so scripts and agents can drive it too:
 
@@ -406,8 +474,70 @@ concept-art jobs drone-bc --state draft_ready
 concept-art show drone-bc <job-id>
 ```
 
-Every command prints the job (or list) as JSON on stdout. `concept-art --help` reprints the runnable
-example above for each art model. `--data-dir` relocates the workspace root, which defaults to `data`.
+**A worked example.** `concept-art --help` reprints a runnable `draft` line for each of the three art
+models, so nothing has to be remembered or guessed:
+
+```console
+$ concept-art --help
+usage: concept-art [-h] [--data-dir DATA_DIR]
+                   {add-reference,draft,approve,reject,final,show,models,jobs}
+                   ...
+
+Human-supervised concept art generator
+
+Only three art models exist; each owns its references and its LoRA:
+
+  concept-art draft drone-bc \
+    "A drone with a smooth white and grey egg-shaped shell, ... plain white background" \
+    --backend huggingface
+  ...
+
+GPT Image 2 uses no LoRA; it works from the same model's references:
+  ...
+Run `concept-art models` for the catalogue as JSON.
+```
+
+Listing and reading back a job — every command answers with JSON, so the output pipes straight into
+`jq` or a script:
+
+```console
+$ concept-art jobs pilot-mw --state draft_ready
+{
+  "jobs": [
+    {
+      "id": "61eeec8baca5",
+      "state": "draft_ready",
+      "backend": "gpt-image-2",
+      "prompt": "pilot-mw A pilot winter sniper in a shaggy white ghillie wrap of frayed cloth
+                 strands over grey-white arctic fatigues, ... plain white background",
+      "created_at": "2026-09-01T15:16:33.547546+00:00"
+    },
+    ...
+  ]
+}
+
+$ concept-art show pilot-mw 61eeec8baca5
+{
+  "id": "61eeec8baca5",
+  "art_model": "pilot-mw",
+  "state": "draft_ready",
+  "backend": "gpt-image-2",
+  "lora_name": null,
+  "draft_path": "...\\data\\models\\pilot-mw\\drafts\\61eeec8baca5.png",
+  "final_path": null,
+  "transparent": true,
+  "notes": [
+    "Draft generated; final is blocked until explicit approval.",
+    "Effective backend: gpt-image-2; provider request: req_..."
+  ]
+}
+```
+
+`lora_name` is `null` here because `gpt-image-2` uses no LoRA — it works from this art model's own
+references instead. `final_path` stays `null`, and `concept-art final` keeps refusing, until the job
+has been approved.
+
+Every command prints the job (or list) as JSON on stdout. `--data-dir` relocates the workspace root, which defaults to `data`.
 `--references N` caps how many references a draft may use (1–16), and `--opaque` disables the
 transparent-PNG default.
 

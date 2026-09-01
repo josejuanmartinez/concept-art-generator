@@ -17,8 +17,11 @@ starts `<art model> <subject>`, so a prompt reads the same whichever backend it 
 
 from __future__ import annotations
 
-from .art_models import ArtModel, resolve_model
+from .art_models import ART_MODEL_NAMES, ArtModel, resolve_model
 from .models import ArtRequest, Backend
+
+# Longest first, so `pilot-bc` is not half-matched by a shorter name that shares its opening.
+_TRIGGERS = tuple(sorted(ART_MODEL_NAMES, key=len, reverse=True))
 
 
 def build_prompt(
@@ -41,11 +44,15 @@ def build_prompt(
 def with_trigger(model: ArtModel, subject: str) -> str:
     """`<trigger> <subject>`, with the trigger separated by a space and never repeated.
 
-    A subject the human already prefixed by hand is normalised rather than doubled up.
+    Any catalogued trigger is stripped, not just this model's: a prompt carried over from
+    another art model arrives still wearing that model's prefix, and prepending on top of it
+    would send `drone-bc pilot-bc A pilot ...` — two styles named in one prompt.
     """
     text = subject.strip().rstrip(".").strip()
-    if text.lower().startswith(model.trigger.lower()):
-        text = text[len(model.trigger) :].lstrip(" ,").strip()
+    for trigger in _TRIGGERS:
+        if text.lower().startswith(trigger.lower()):
+            text = text[len(trigger) :].lstrip(" ,").strip()
+            break
     return f"{model.trigger} {text}" if text else model.trigger
 
 
